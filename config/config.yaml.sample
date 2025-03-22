@@ -1,0 +1,86 @@
+# config.yaml
+
+ssh:
+  user: username #this user must have read/write access to the live site's server path
+  host: 0.0.0.0 #this should be the server used for SSH
+  key_path: path/to/ssh/keys
+  sudo:
+    user: sudo_username  # Optional: Separate user for sudo operations (e.g., root)
+    key_path: path/to/sudo/user/ssh/keys  # Optional: Different SSH key for sudo user
+
+operation:
+  direction: "push"  # Options: "push" (local to live) or "pull" (live to local)
+
+paths:
+  local: /path/to/local/site/
+  live: /path/to/live/site/
+  db_temp: /tmp/
+  db_filename: wordpress-sync-database.sql
+
+ownership:
+  user: username
+  group: username
+
+validation:
+  enabled: true
+  checks:
+    core_files:
+      enabled: true
+      verify_checksums: true  # Uses wp core verify-checksums
+      critical_files:         # Additional files to verify
+        - wp-config.php
+        - wp-content/index.php
+        - .htaccess
+    
+    database:
+      enabled: true
+      verify_core_tables: true
+      additional_tables: []   # Add any custom tables here
+    
+    accessibility:
+      homepage: true         # Verify homepage returns 200
+      wp_admin: true        # Verify wp-admin returns 200
+
+rsync:
+  dry_run: true  # When true (default), performs a dry run first and asks for confirmation
+                 # When false, skips the dry run and performs the actual synchronization immediately
+                 # Note: The --no-dry-run command line flag will override this setting
+  delete: true
+  progress: true
+  verbose: true
+  compress: true
+  chmod_files: "664"
+  chmod_dirs: "775"
+  excludes:
+    - "wp-config.php" #ALWAYS exclude wp-config or else you will have to restore it from a backup or rebuild it.
+    - "admin-bar-color-for-staging.php" #changes the admin color bar when installed on the staging site, but prevents this transfer to live
+  cleanup_files:  # Files to remove from destination before sync
+    - ".DS_Store" # Suggested if the local environment is run on a Mac
+
+domains:
+  staging:
+    http: http://staging.domain.com
+    https: https://staging.domain.com
+  live:
+    http: http://www.domain.com
+    https: https://www.domain.com
+
+plugins:
+  live:
+    activate:
+      - "really-simple-ssl"        # Example: SSL plugin needed on live
+      - "wordfence"               # Example: Security plugin for live
+      - "wp-rocket"              # Example: Caching for live
+    deactivate:
+      - "debug-bar"              # Example: Development plugin not needed on live
+      - "query-monitor"          # Example: Debug plugin not needed on live
+      - "wp-debugging"           # Example: Debug plugin not needed on live
+  local:
+    activate:
+      - "debug-bar"              # Example: Helpful for local development
+      - "query-monitor"          # Example: Debug information locally
+      - "wp-debugging"           # Example: Debugging tools for local
+    deactivate:
+      - "really-simple-ssl"      # Example: Not needed locally
+      - "wordfence"             # Example: Security plugin not needed locally
+      - "wp-rocket"            # Example: Caching not needed locally
