@@ -140,6 +140,9 @@ After installation, run the tool from your terminal using the wrapper script:
 
 # Provide sudo password for remote server operations (when pushing to live)
 ./wordpress-sync --direction push --sudo-password "your-sudo-password"
+
+# Skip backup of deleted/modified files to trash directory
+./wordpress-sync --direction push --no-trash
 ```
 
 ### Command-Only Mode
@@ -318,6 +321,57 @@ When pushing to a live server, you may need sudo privileges to set file permissi
    - This is the most user-friendly approach for manual operations
 
 The tool automatically detects which method to use by checking for a dedicated sudo user first, then trying NOPASSWD sudo, and finally falling back to interactive prompting if needed.
+
+### Backup and Trash Management
+
+The tool includes a comprehensive backup system that preserves both files and databases during synchronization:
+
+1. **File Backup**:
+   - During rsync operations, the `--backup` flag is used to preserve files that would be overwritten or deleted
+   - These files are moved to a trash directory (`.trash` by default) in the parent directory of the target site
+   - Before synchronization, the tool checks if the trash directory already contains files
+   - After synchronization and validation, the tool prompts you to review and optionally delete the backed-up files
+
+2. **Database Backup**:
+   - Before resetting a database during import, the tool offers to create a backup
+   - Database backups are stored in a dedicated backup directory with timestamped filenames
+   - This provides a safety net in case you need to restore the database to its previous state
+   - Backups are preserved and not cleaned up automatically, allowing for point-in-time recovery
+
+3. **Configuration options** in `config.yaml`:
+   ```yaml
+   backup:
+     enabled: true  # Enable backup of deleted/modified files during rsync
+     directory: "../wordpress-sync-trash"  # Path to backup directory (relative to local/live paths)
+     archive_format: "wordpress-sync-trash_%Y-%m-%d_%H%M%S"  # Format for archive names
+     cleanup_prompt: true  # Whether to prompt for cleanup after sync
+     database:
+       enabled: true  # Enable database backups before reset
+       directory: "../wordpress-sync-db-backups"  # Path to store database backups
+       filename_format: "db-backup_%Y-%m-%d_%H%M%S.sql"  # Format for backup filenames
+   ```
+
+4. **Command-line control**:
+   - Use `--no-trash` to disable the file backup functionality
+   - Database backups are controlled via the configuration file
+
+5. **Workflow**:
+   - **Before sync**: If the trash directory contains files from a previous sync:
+     - The tool shows you the existing files
+     - You can choose to keep them (they'll be archived with a timestamp) or delete them
+   - **During database reset**: If database backups are enabled:
+     - The tool prompts you to create a backup before resetting the database
+     - If you choose yes, a timestamped backup is created in the configured backup directory
+   - **After sync**: If files were backed up during the sync:
+     - The tool shows you which files were backed up
+     - You can choose to delete them or keep them for reference
+
+This backup system provides a safety net when synchronizing WordPress sites, allowing you to:
+- Recover accidentally deleted files
+- Restore databases to their previous state if needed
+- Review what changes were made during synchronization
+- Keep a history of changes by archiving old trash directories and database backups
+- Safely clean up backup files when they're no longer needed
 
 ---
 

@@ -14,7 +14,7 @@ operation:
 paths:
   local: /path/to/local/site/
   live: /path/to/live/site/
-  db_temp: /tmp/
+  db_temp: ../wordpress-sync-tmp-db/
   db_filename: wordpress-sync-database.sql
 
 ownership:
@@ -53,9 +53,21 @@ rsync:
   chmod_dirs: "775"
   excludes:
     - "wp-config.php" #ALWAYS exclude wp-config or else you will have to restore it from a backup or rebuild it.
-    - "admin-bar-color-for-staging.php" #changes the admin color bar when installed on the staging site, but prevents this transfer to live
+    - "admin-bar-color-for-staging.php"
+    - ".maintenance"
+    - ".htaccess" #changes the admin color bar when installed on the staging site, but prevents this transfer to live
   cleanup_files:  # Files to remove from destination before sync
     - ".DS_Store" # Suggested if the local environment is run on a Mac
+
+backup:
+  enabled: true  # Enable backup of deleted/modified files during rsync
+  directory: "../wordpress-sync-trash"  # Path to backup directory (relative to local/live paths)
+  archive_format: "wordpress-sync-trash_%Y-%m-%d_%H%M%S"  # Format for archive names when keeping old trash
+  cleanup_prompt: true  # Whether to prompt for cleanup after sync
+  database:
+    enabled: true  # Enable database backups before reset
+    directory: "../wordpress-sync-db-backups"  # Path to store database backups (relative to local/live paths)
+    filename_format: "db-backup_%Y-%m-%d_%H%M%S.sql"  # Format for backup filenames
 
 domains:
   staging:

@@ -82,6 +82,14 @@ class SSHManager:
         chmod_dirs = self.config["rsync"].get("chmod_dirs", "775")
         options.append(f"--chmod=F{chmod_files},D{chmod_dirs}")
 
+        # Backup options - only add if not explicitly disabled
+        if not self.config.get("no_trash", False):
+            # Get the backup directory path
+            backup_dir = self._get_backup_dir(self.config)
+            if backup_dir:
+                options.append("--backup")
+                options.append(f"--backup-dir={backup_dir}")
+
         # Excludes
         excludes = self.config["rsync"].get("excludes", [])
         for exclude in excludes:
@@ -353,6 +361,84 @@ class SSHManager:
             print("Falling back to regular user with sudo due to error...")
             return self.execute_remote_command(f"sudo {command}", dry_run, sudo_password, command_collector)
 
+    def _get_backup_dir(self, config):
+        """
+        Get the backup directory path based on configuration and direction.
+        
+        Returns:
+            str: Path to the backup directory, or None if backup is disabled.
+        """
+        # Check if backup is configured
+        if "backup" not in config or not config["backup"].get("enabled", True):
+            return None
+            
+        # Get the backup directory from config or use default
+        backup_dir = config["backup"].get("directory", "../.trash")
+        
+        # Determine the base path based on direction
+        if hasattr(self, 'direction') and self.direction:
+            base_path = self.live_path if self.direction == "push" else self.local_path
+        else:
+            # If direction is not set yet, we'll determine it later
+            base_path = None
+            
+        # If base_path is available, resolve the backup directory path
+        if base_path:
+            # If backup_dir is relative, make it relative to the base path
+            if not os.path.isabs(backup_dir):
+                backup_dir = os.path.normpath(os.path.join(os.path.dirname(base_path), backup_dir))
+                
+        return backup_dir
+        
+    def _ensure_backup_dir_exists(self, direction):
+        """
+        Ensure the backup directory exists.
+        
+        Args:
+            direction (str): Direction of transfer ('push' or 'pull').
+            
+        Returns:
+            bool: True if successful, False otherwise.
+        """
+        backup_dir = self._get_backup_dir(self.config)
+        if not backup_dir:
+            return True  # Backup is disabled, nothing to do
+            
+        try:
+            print(f"Ensuring backup directory exists: {backup_dir}")
+            
+            if direction == "push":
+                # For push, the backup directory is on the remote server
+                # First check if the directory exists
+                check_cmd = f"test -d {backup_dir} && echo 'EXISTS' || echo 'NOT_EXISTS'"
+                success, output = self.execute_remote_command(check_cmd)
+                
+                if not success:
+                    print(f"Failed to check if backup directory exists: {output}")
+                    return False
+                    
+                if "EXISTS" not in output:
+                    # Directory doesn't exist, create it
+                    mkdir_cmd = f"mkdir -p {backup_dir}"
+                    success, output = self.execute_remote_command(mkdir_cmd)
+                    
+                    if not success:
+                        print(f"Failed to create backup directory: {output}")
+                        return False
+                        
+                    print(f"Created backup directory on remote server: {backup_dir}")
+            else:
+                # For pull, the backup directory is on the local system
+                if not os.path.exists(backup_dir):
+                    os.makedirs(backup_dir, exist_ok=True)
+                    print(f"Created backup directory on local system: {backup_dir}")
+                    
+            return True
+            
+        except Exception as e:
+            print(f"Error ensuring backup directory exists: {e}")
+            return False
+
     def transfer_files(self, direction, dry_run=False, sudo_password=None, command_collector=None):
         """
         Transfer files between local and remote servers using rsync.
@@ -366,9 +452,16 @@ class SSHManager:
             bool: True if transfer is successful, False otherwise.
         """
         try:
+            # Store the direction for use in other methods
+            self.direction = direction
+            
             # Clean up files at destination before sync
             if not dry_run:
                 self._cleanup_destination_files(direction, sudo_password=sudo_password)
+                
+            # Ensure backup directory exists if backup is enabled
+            if not self.config.get("no_trash", False) and not dry_run:
+                self._ensure_backup_dir_exists(direction)
             
             # Build rsync command
             rsync_cmd = ["rsync"]

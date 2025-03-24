@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import shlex
+import time
 from pathlib import Path
 
 
@@ -29,8 +30,11 @@ class DatabaseManager:
         self.db_temp = config["paths"]["db_temp"]
         self.db_filename = config["paths"].get("db_filename", "wordpress-sync-database.sql")
         
+        # Get the correct local temp directory path
+        local_db_temp = self._get_local_db_temp_path()
+        
         # Ensure temp directory exists
-        os.makedirs(self.db_temp, exist_ok=True)
+        os.makedirs(local_db_temp, exist_ok=True)
 
     def check_wp_cli(self):
         """
@@ -195,6 +199,171 @@ class DatabaseManager:
                 print(f"Error checking WordPress installation: {e}")
                 return False
 
+    def _get_local_db_temp_path(self):
+        """
+        Get the correct path for the local temporary database directory.
+        
+        Returns:
+            str: Path to the local temporary database directory.
+        """
+        # If db_temp is an absolute path, use it directly
+        if os.path.isabs(self.db_temp):
+            return self.db_temp
+            
+        # For relative paths that start with ../
+        if self.db_temp.startswith('../'):
+            # Get the parent directory of the WordPress directory
+            parent_dir = os.path.dirname(self.local_path.rstrip('/'))
+            # Remove the ../ prefix from db_temp
+            relative_path = self.db_temp[3:]
+            # Join the parent directory with the remaining path
+            return os.path.join(parent_dir, relative_path)
+        
+        # For other relative paths, join with local_path
+        return os.path.join(self.local_path, self.db_temp)
+            
+    def _get_remote_db_temp_path(self):
+        """
+        Get the correct path for the remote temporary database directory.
+        
+        Returns:
+            str: Path to the remote temporary database directory.
+        """
+        # If db_temp is an absolute path, use it directly
+        if os.path.isabs(self.db_temp):
+            return self.db_temp
+            
+        # For relative paths that start with ../
+        if self.db_temp.startswith('../'):
+            # Get the parent directory of the WordPress directory
+            parent_dir = os.path.dirname(self.live_path.rstrip('/'))
+            # Remove the ../ prefix from db_temp
+            relative_path = self.db_temp[3:]
+            # Join the parent directory with the remaining path
+            return os.path.join(parent_dir, relative_path)
+        
+        # For other relative paths, join with live_path
+        return os.path.join(self.live_path, self.db_temp)
+        
+    def _get_db_backup_path(self, is_remote=False):
+        """
+        Get the path for database backups.
+        
+        Args:
+            is_remote (bool): Whether the path is for the remote server.
+            
+        Returns:
+            tuple: (backup_dir, backup_filename) - Paths for the backup directory and filename.
+        """
+        # Check if database backup settings exist in config
+        if "backup" not in self.config or "database" not in self.config["backup"]:
+            # Use default values if not configured
+            backup_dir = "../wordpress-sync-db-backups"
+            filename_format = "db-backup_%Y-%m-%d_%H%M%S.sql"
+        else:
+            # Get settings from config
+            backup_dir = self.config["backup"]["database"].get("directory", "../wordpress-sync-db-backups")
+            filename_format = self.config["backup"]["database"].get("filename_format", "db-backup_%Y-%m-%d_%H%M%S.sql")
+        
+        # Generate timestamp for unique backup filename
+        timestamp = time.strftime(filename_format.replace(".sql", ""))
+        backup_filename = f"{timestamp}.sql"
+        
+        # Determine base path based on whether it's remote or local
+        base_path = self.live_path if is_remote else self.local_path
+        
+        # Resolve the full backup directory path
+        if os.path.isabs(backup_dir):
+            full_backup_dir = backup_dir
+        elif backup_dir.startswith('../'):
+            # Get the parent directory of the WordPress directory
+            parent_dir = os.path.dirname(base_path.rstrip('/'))
+            # Remove the ../ prefix from backup_dir
+            relative_path = backup_dir[3:]
+            # Join the parent directory with the remaining path
+            full_backup_dir = os.path.join(parent_dir, relative_path)
+        else:
+            # For other relative paths, join with base_path
+            full_backup_dir = os.path.join(base_path, backup_dir)
+            
+        return full_backup_dir, backup_filename
+        
+    def backup_database(self, direction, dry_run=False):
+        """
+        Create a backup of the destination database before reset.
+        
+        Args:
+            direction (str): Direction of synchronization ('push' or 'pull').
+            dry_run (bool): If True, only print the command without executing.
+            
+        Returns:
+            str: Path to the backup file, or None if backup failed.
+        """
+        # For push: backup remote db (live site)
+        # For pull: backup local db (local site)
+        if direction == "push":
+            target_path = self.live_path
+            is_remote = True
+        else:  # pull
+            target_path = self.local_path
+            is_remote = False
+            
+        # Get backup paths
+        backup_dir, backup_filename = self._get_db_backup_path(is_remote)
+        backup_file = os.path.join(backup_dir, backup_filename)
+        
+        if dry_run:
+            print(f"[DRY RUN] Would backup database at {target_path} to {backup_file}")
+            return backup_file
+            
+        # Ensure backup directory exists
+        if is_remote:
+            from resources.ssh_manager import SSHManager
+            ssh_manager = SSHManager(self.config)
+            
+            mkdir_cmd = f"mkdir -p {backup_dir}"
+            success, _ = ssh_manager.execute_remote_command(mkdir_cmd)
+            if not success:
+                print(f"Failed to create backup directory on remote server: {backup_dir}")
+                return None
+                
+            # Export database to backup file
+            export_cmd = f'wp --path="{target_path}" db export {backup_file} --allow-root'
+            success, output = ssh_manager.execute_remote_command(export_cmd)
+            
+            if not success:
+                print(f"Failed to backup remote database: {output}")
+                return None
+                
+            print(f"Database backed up to {backup_file} on remote server")
+        else:
+            # Ensure local backup directory exists
+            os.makedirs(backup_dir, exist_ok=True)
+            
+            try:
+                # Export database to backup file
+                cmd = f'wp --path="{target_path}" db export {backup_file} --allow-root'
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                    shell=True
+                )
+                
+                if result.returncode != 0:
+                    print(f"Failed to backup local database: {result.stderr}")
+                    return None
+                    
+                print(f"Database backed up to {backup_file}")
+                
+            except Exception as e:
+                print(f"Error backing up database: {e}")
+                return None
+                
+        return backup_file
+
     def export_database(self, direction, dry_run=False):
         """
         Export the database from the source environment.
@@ -209,19 +378,23 @@ class DatabaseManager:
         if direction == "push":
             # Export from local
             source_path = self.local_path
-            db_file = os.path.join(self.db_temp, self.db_filename)
+            # Get the correct local temp directory path
+            local_db_temp = self._get_local_db_temp_path()
+            db_file = os.path.join(local_db_temp, self.db_filename)
             is_remote = False
         else:  # pull
             # Export from remote
             source_path = self.live_path
-            db_file = os.path.join(self.live_path, "tmp", self.db_filename)
+            # Get the correct remote temp directory path
+            remote_db_temp = self._get_remote_db_temp_path()
+            db_file = os.path.join(remote_db_temp, self.db_filename)
             is_remote = True
             
-            # Ensure remote tmp directory exists
+            # Ensure remote db_temp directory exists
             if not dry_run:
                 from resources.ssh_manager import SSHManager
                 ssh_manager = SSHManager(self.config)
-                mkdir_cmd = f"mkdir -p {os.path.dirname(db_file)}"
+                mkdir_cmd = f"mkdir -p {remote_db_temp}"
                 ssh_manager.execute_remote_command(mkdir_cmd)
 
         if dry_run:
@@ -268,7 +441,9 @@ class DatabaseManager:
             from resources.ssh_manager import SSHManager
             ssh_manager = SSHManager(self.config)
             
-            local_db_file = os.path.join(self.db_temp, self.db_filename)
+            # Get the correct local temp directory path
+            local_db_temp = self._get_local_db_temp_path()
+            local_db_file = os.path.join(local_db_temp, self.db_filename)
             success = ssh_manager.transfer_file(db_file, local_db_file, "pull")
             
             if not success:
@@ -294,7 +469,9 @@ class DatabaseManager:
         if direction == "push":
             # Import to remote
             target_path = self.live_path
-            remote_db_file = os.path.join(self.live_path, "tmp", self.db_filename)
+            # Get the correct remote temp directory path
+            remote_db_temp = self._get_remote_db_temp_path()
+            remote_db_file = os.path.join(remote_db_temp, self.db_filename)
             is_remote = True
             
             # Transfer database file to remote server
@@ -302,8 +479,8 @@ class DatabaseManager:
                 from resources.ssh_manager import SSHManager
                 ssh_manager = SSHManager(self.config)
                 
-                # Ensure remote tmp directory exists
-                mkdir_cmd = f"mkdir -p {os.path.dirname(remote_db_file)}"
+                # Ensure remote db_temp directory exists
+                mkdir_cmd = f"mkdir -p {remote_db_temp}"
                 ssh_manager.execute_remote_command(mkdir_cmd)
                 
                 # Transfer file
@@ -387,7 +564,22 @@ class DatabaseManager:
         if dry_run:
             print(f"[DRY RUN] Would reset database at {target_path}")
             return True
-
+            
+        # Check if database backups are enabled
+        backup_enabled = False
+        if "backup" in self.config and "database" in self.config["backup"]:
+            backup_enabled = self.config["backup"]["database"].get("enabled", False)
+            
+        # Offer to backup the database before reset
+        if backup_enabled:
+            response = input("\nWould you like to backup the destination database before reset? (yes/no): ").lower()
+            if response in ["yes", "y"]:
+                backup_file = self.backup_database(direction, dry_run=False)
+                if backup_file:
+                    print(f"Database backed up successfully to: {backup_file}")
+                else:
+                    print("Warning: Database backup failed, proceeding with reset anyway")
+                    
         # Reset database
         if is_remote:
             from resources.ssh_manager import SSHManager
@@ -503,17 +695,31 @@ class DatabaseManager:
             return True
 
         try:
-            # Clean up local database file
+            # Get the correct local and remote temp directory paths
+            local_db_temp = self._get_local_db_temp_path()
+            remote_db_temp = self._get_remote_db_temp_path()
+            remote_db_file = os.path.join(remote_db_temp, self.db_filename)
+            
+            # Clean up local database file and directory
             if os.path.exists(db_file):
                 os.remove(db_file)
                 print(f"Removed local database file: {db_file}")
+            
+            # Remove the local temp directory if it exists and is empty
+            if os.path.exists(local_db_temp):
+                # Check if directory is empty
+                if not os.listdir(local_db_temp):
+                    os.rmdir(local_db_temp)
+                    print(f"Removed local temp directory: {local_db_temp}")
+                else:
+                    print(f"Local temp directory not empty, skipping removal: {local_db_temp}")
 
-            # Clean up remote database file if pushing
+            # Clean up remote database file and directory
+            from resources.ssh_manager import SSHManager
+            ssh_manager = SSHManager(self.config)
+            
             if direction == "push":
-                from resources.ssh_manager import SSHManager
-                ssh_manager = SSHManager(self.config)
-                
-                remote_db_file = os.path.join(self.live_path, "tmp", self.db_filename)
+                # Clean up the file we pushed to the remote server
                 cleanup_cmd = f'rm -f "{remote_db_file}"'
                 success, _ = ssh_manager.execute_remote_command(cleanup_cmd)
                 
@@ -521,6 +727,31 @@ class DatabaseManager:
                     print(f"Removed remote database file: {remote_db_file}")
                 else:
                     print(f"Warning: Failed to remove remote database file: {remote_db_file}")
+                
+                # Force remove the remote temp directory
+                rmdir_cmd = f'rm -rf "{remote_db_temp}"'
+                success, _ = ssh_manager.execute_remote_command(rmdir_cmd)
+                if success:
+                    print(f"Removed remote temp directory: {remote_db_temp}")
+                else:
+                    print(f"Warning: Failed to remove remote temp directory: {remote_db_temp}")
+            else:  # pull
+                # Clean up the file we exported on the remote server
+                cleanup_cmd = f'rm -f "{remote_db_file}"'
+                success, _ = ssh_manager.execute_remote_command(cleanup_cmd)
+                
+                if success:
+                    print(f"Removed remote database file: {remote_db_file}")
+                else:
+                    print(f"Warning: Failed to remove remote database file: {remote_db_file}")
+                
+                # Force remove the remote temp directory
+                rmdir_cmd = f'rm -rf "{remote_db_temp}"'
+                success, _ = ssh_manager.execute_remote_command(rmdir_cmd)
+                if success:
+                    print(f"Removed remote temp directory: {remote_db_temp}")
+                else:
+                    print(f"Warning: Failed to remove remote temp directory: {remote_db_temp}")
 
             return True
             
