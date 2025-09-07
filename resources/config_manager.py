@@ -122,6 +122,16 @@ class ConfigManager:
         if "key_path" not in self.config["ssh"]:
             self.config["ssh"]["key_path"] = os.path.expanduser("~/.ssh/id_rsa")
 
+        # Default SSH port (allow override via config)
+        if "port" not in self.config["ssh"]:
+            self.config["ssh"]["port"] = 22
+        else:
+            # Normalize to integer and validate
+            try:
+                self.config["ssh"]["port"] = int(self.config["ssh"]["port"])
+            except (TypeError, ValueError):
+                raise ValueError(f"Invalid SSH port value in config: {self.config['ssh']['port']}")
+
         # Default database filename
         if "db_filename" not in self.config["paths"]:
             self.config["paths"]["db_filename"] = "wordpress-sync-database.sql"

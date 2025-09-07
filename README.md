@@ -77,6 +77,7 @@ All environment settings are stored in `config.yaml`. Example:
 ssh:
   user: username
   host: 0.0.0.0
+  port: 22  # Optional: SSH port (default: 22)
   key_path: path/to/ssh/keys
 
 operation:
@@ -245,6 +246,7 @@ Always verify your site's functionality after addressing any errors.
 - The synchronization process always begins in dry-run mode, allowing you to review the changes before confirming the sync.
 - wp-config.php is excluded during the sync process to avoid overwriting critical configuration.
 - Ensure your SSH key is loaded in the SSH agent or explicitly provided in config.yaml if necessary.
+- If your server uses a non-standard SSH port, set `ssh.port` in config.yaml.
 - Always test your synchronization first with dry-run mode enabled before syncing to the live site.
 
 ### Understanding Excludes vs. Cleanup Files

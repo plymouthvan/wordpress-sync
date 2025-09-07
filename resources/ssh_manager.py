@@ -9,6 +9,7 @@ and transferring files between local and remote servers.
 
 import os
 import subprocess
+import shlex
 import sys
 from pathlib import Path
 from resources.password_manager import PasswordManager
@@ -28,6 +29,7 @@ class SSHManager:
         self.ssh_user = config["ssh"]["user"]
         self.ssh_host = config["ssh"]["host"]
         self.ssh_key_path = config["ssh"]["key_path"]
+        self.ssh_port = int(config["ssh"].get("port", 22))
         
         # Initialize sudo user properties if configured
         self.sudo_user = None
@@ -94,7 +96,11 @@ class SSHManager:
         excludes = self.config["rsync"].get("excludes", [])
         for exclude in excludes:
             options.append(f"--exclude={exclude}")
-
+        
+        # Ensure rsync uses the specified SSH key and port
+        remote_shell = f"ssh -i {self.ssh_key_path} -p {self.ssh_port}"
+        options.extend(["-e", remote_shell])
+        
         return options
 
     def test_connection(self):
@@ -108,6 +114,7 @@ class SSHManager:
             cmd = [
                 "ssh",
                 "-i", self.ssh_key_path,
+                "-p", str(self.ssh_port),
                 "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=5",
                 f"{self.ssh_user}@{self.ssh_host}",
@@ -153,7 +160,7 @@ class SSHManager:
             if is_sudo_command and sudo_password:
                 # For sudo commands with password, show a sanitized version
                 sudo_cmd = command.replace("sudo ", "sudo -S ")
-                ssh_cmd = f"echo \"PASSWORD\" | ssh -i {self.ssh_key_path} {self.ssh_user}@{self.ssh_host} \"{sudo_cmd}\""
+                ssh_cmd = f"echo \"PASSWORD\" | ssh -i {self.ssh_key_path} -p {self.ssh_port} {self.ssh_user}@{self.ssh_host} \"{sudo_cmd}\""
                 command_collector.add_command(
                     ssh_cmd,
                     f"Execute sudo command with password: {command}",
@@ -161,7 +168,7 @@ class SSHManager:
                 )
             else:
                 # Standard SSH command
-                ssh_cmd = f"ssh -i {self.ssh_key_path} {self.ssh_user}@{self.ssh_host} '{command}'"
+                ssh_cmd = f"ssh -i {self.ssh_key_path} -p {self.ssh_port} {self.ssh_user}@{self.ssh_host} '{command}'"
                 command_collector.add_command(
                     ssh_cmd,
                     f"Execute remote command: {command}",
@@ -183,7 +190,7 @@ class SSHManager:
                 sudo_cmd = command.replace("sudo ", "sudo -S ")
                 
                 # Create a full command that pipes the password to sudo
-                full_cmd = f'echo "{sudo_password}" | ssh -i {self.ssh_key_path} {self.ssh_user}@{self.ssh_host} "{sudo_cmd}"'
+                full_cmd = f'echo "{sudo_password}" | ssh -i {self.ssh_key_path} -p {self.ssh_port} {self.ssh_user}@{self.ssh_host} "{sudo_cmd}"'
                 
                 # Execute the command using shell=True to handle the pipe
                 result = subprocess.run(
@@ -205,6 +212,7 @@ class SSHManager:
             cmd = [
                 "ssh",
                 "-i", self.ssh_key_path,
+                "-p", str(self.ssh_port),
             ]
             
             # Add -t flag for pseudo-terminal allocation if it's a sudo command
@@ -260,7 +268,7 @@ class SSHManager:
         # Add to command collector if provided
         if command_collector:
             # For command collector mode, always show the command without sudo
-            ssh_cmd = f"ssh -i {self.sudo_key_path} {self.sudo_user}@{self.ssh_host} '{command}'"
+            ssh_cmd = f"ssh -i {self.sudo_key_path} -p {self.ssh_port} {self.sudo_user}@{self.ssh_host} '{command}'"
             command_collector.add_command(
                 ssh_cmd,
                 f"Execute as sudo user '{self.sudo_user}': {command}",
@@ -280,6 +288,7 @@ class SSHManager:
             cmd = [
                 "ssh",
                 "-i", self.sudo_key_path,
+                "-p", str(self.ssh_port),
                 f"{self.sudo_user}@{self.ssh_host}",
                 command
             ]
@@ -302,7 +311,7 @@ class SSHManager:
                     # First try without password (in case NOPASSWD sudo is configured)
                     check_cmd = "sudo -n true 2>/dev/null && echo 'NOPASSWD' || echo 'PASSWORD'"
                     check_result = subprocess.run(
-                        ["ssh", "-i", self.sudo_key_path, f"{self.sudo_user}@{self.ssh_host}", check_cmd],
+                        ["ssh", "-i", self.sudo_key_path, "-p", str(self.ssh_port), f"{self.sudo_user}@{self.ssh_host}", check_cmd],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
@@ -322,7 +331,7 @@ class SSHManager:
                 if sudo_password:
                     # Use sudo with password
                     sudo_cmd = f"sudo -S {command}"
-                    full_cmd = f'echo "{sudo_password}" | ssh -i {self.sudo_key_path} {self.sudo_user}@{self.ssh_host} "{sudo_cmd}"'
+                    full_cmd = f'echo "{sudo_password}" | ssh -i {self.sudo_key_path} -p {self.ssh_port} {self.sudo_user}@{self.ssh_host} "{sudo_cmd}"'
                     
                     sudo_result = subprocess.run(
                         full_cmd,
@@ -336,7 +345,7 @@ class SSHManager:
                     # Use sudo without password
                     sudo_cmd = f"sudo {command}"
                     sudo_result = subprocess.run(
-                        ["ssh", "-i", self.sudo_key_path, f"{self.sudo_user}@{self.ssh_host}", sudo_cmd],
+                        ["ssh", "-i", self.sudo_key_path, "-p", str(self.ssh_port), f"{self.sudo_user}@{self.ssh_host}", sudo_cmd],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
@@ -494,7 +503,7 @@ class SSHManager:
             
             # Add to command collector if provided
             if command_collector:
-                rsync_cmd_str = ' '.join(rsync_cmd)
+                rsync_cmd_str = ' '.join(shlex.quote(arg) for arg in rsync_cmd)
                 command_collector.add_command(
                     rsync_cmd_str,
                     f"Transfer files {'from local to remote' if direction == 'push' else 'from remote to local'}",
@@ -764,7 +773,7 @@ class SSHManager:
 
         try:
             # Build scp command
-            scp_cmd = ["scp", "-i", self.ssh_key_path]
+            scp_cmd = ["scp", "-i", self.ssh_key_path, "-P", str(self.ssh_port)]
             
             # Set source and destination based on direction
             if direction == "push":

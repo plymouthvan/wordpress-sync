@@ -3,6 +3,7 @@
 ssh:
   user: username #this user must have read/write access to the live site's server path
   host: 0.0.0.0 #this should be the server used for SSH
+  port: 22  # Optional: SSH port (default: 22)
   key_path: path/to/ssh/keys
   sudo:
     user: sudo_username  # Optional: Separate user for sudo operations (e.g., root)
