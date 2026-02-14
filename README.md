@@ -540,4 +540,6 @@ An optional mu-plugin (`cli/staging_etc/mu-plugins/admin-bar-color-for-staging.p
 
 ## License
 
-MIT License
+[PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0)
+
+Free to use, copy, modify, and redistribute for any noncommercial purpose. Commercial distribution and resale of derivative works are not permitted. See [LICENSE](LICENSE) for full terms.
