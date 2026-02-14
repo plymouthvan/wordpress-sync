@@ -45,6 +45,11 @@ class SSHManager:
         
         self.local_path = config["paths"]["local"]
         self.live_path = config["paths"]["live"]
+        
+        # When running non-interactively (e.g. from a GUI), use BatchMode
+        # so SSH/SCP fail fast instead of hanging waiting for a passphrase.
+        self.non_interactive = config.get("_non_interactive", False)
+        
         self.rsync_options = self._build_rsync_options()
         self.password_manager = PasswordManager()
 
@@ -99,7 +104,18 @@ class SSHManager:
         
         # Ensure rsync uses the specified SSH key and port
         remote_shell = f"ssh -i {self.ssh_key_path} -p {self.ssh_port}"
+        if self.non_interactive:
+            remote_shell += " -o BatchMode=yes -o ConnectTimeout=30"
         options.extend(["-e", remote_shell])
+        
+        # Add --itemize-changes if requested (runtime flag from CLI)
+        if self.config.get("_itemize_changes", False):
+            options.append("--itemize-changes")
+        
+        # Append any extra rsync args passed via CLI (runtime flag)
+        extra_args = self.config.get("_extra_rsync_args", "")
+        if extra_args:
+            options.extend(shlex.split(extra_args))
         
         return options
 
@@ -123,6 +139,7 @@ class SSHManager:
             
             result = subprocess.run(
                 cmd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -190,11 +207,13 @@ class SSHManager:
                 sudo_cmd = command.replace("sudo ", "sudo -S ")
                 
                 # Create a full command that pipes the password to sudo
-                full_cmd = f'echo "{sudo_password}" | ssh -i {self.ssh_key_path} -p {self.ssh_port} {self.ssh_user}@{self.ssh_host} "{sudo_cmd}"'
+                batch_opt = " -o BatchMode=yes" if self.non_interactive else ""
+                full_cmd = f'echo "{sudo_password}" | ssh -i {self.ssh_key_path} -p {self.ssh_port}{batch_opt} {self.ssh_user}@{self.ssh_host} "{sudo_cmd}"'
                 
                 # Execute the command using shell=True to handle the pipe
                 result = subprocess.run(
                     full_cmd,
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -215,6 +234,10 @@ class SSHManager:
                 "-p", str(self.ssh_port),
             ]
             
+            # In non-interactive mode, fail fast instead of prompting for passphrase
+            if self.non_interactive:
+                cmd.extend(["-o", "BatchMode=yes", "-o", "ConnectTimeout=30"])
+            
             # Add -t flag for pseudo-terminal allocation if it's a sudo command
             if is_sudo_command:
                 cmd.append("-t")
@@ -228,6 +251,7 @@ class SSHManager:
             
             result = subprocess.run(
                 cmd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -295,6 +319,7 @@ class SSHManager:
             
             result = subprocess.run(
                 cmd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -312,6 +337,7 @@ class SSHManager:
                     check_cmd = "sudo -n true 2>/dev/null && echo 'NOPASSWD' || echo 'PASSWORD'"
                     check_result = subprocess.run(
                         ["ssh", "-i", self.sudo_key_path, "-p", str(self.ssh_port), f"{self.sudo_user}@{self.ssh_host}", check_cmd],
+                        stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
@@ -335,6 +361,7 @@ class SSHManager:
                     
                     sudo_result = subprocess.run(
                         full_cmd,
+                        stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
@@ -346,6 +373,7 @@ class SSHManager:
                     sudo_cmd = f"sudo {command}"
                     sudo_result = subprocess.run(
                         ["ssh", "-i", self.sudo_key_path, "-p", str(self.ssh_port), f"{self.sudo_user}@{self.ssh_host}", sudo_cmd],
+                        stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
@@ -517,6 +545,7 @@ class SSHManager:
             # Use Popen to stream output in real-time
             process = subprocess.Popen(
                 rsync_cmd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -739,6 +768,7 @@ class SSHManager:
                     cmd = f"find {self.local_path} -name '{file_pattern}' -type f -delete"
                     result = subprocess.run(
                         cmd,
+                        stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
@@ -774,6 +804,8 @@ class SSHManager:
         try:
             # Build scp command
             scp_cmd = ["scp", "-i", self.ssh_key_path, "-P", str(self.ssh_port)]
+            if self.non_interactive:
+                scp_cmd.extend(["-o", "BatchMode=yes", "-o", "ConnectTimeout=30"])
             
             # Set source and destination based on direction
             if direction == "push":
@@ -801,6 +833,7 @@ class SSHManager:
             print(f"Executing: {' '.join(scp_cmd)}")
             result = subprocess.run(
                 scp_cmd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

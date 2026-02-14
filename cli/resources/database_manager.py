@@ -572,7 +572,12 @@ class DatabaseManager:
             
         # Offer to backup the database before reset
         if backup_enabled:
-            response = input("\nWould you like to backup the destination database before reset? (yes/no): ").lower()
+            non_interactive = self.config.get("_non_interactive", False)
+            if non_interactive:
+                print("\nNon-interactive mode: automatically backing up database before reset.")
+                response = "yes"
+            else:
+                response = input("\nWould you like to backup the destination database before reset? (yes/no): ").lower()
             if response in ["yes", "y"]:
                 backup_file = self.backup_database(direction, dry_run=False)
                 if backup_file:
@@ -598,6 +603,7 @@ class DatabaseManager:
                 cmd = f'wp --path="{target_path}" db reset --yes --allow-root'
                 result = subprocess.run(
                     cmd,
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,

@@ -49,6 +49,7 @@ class WordPressSync:
         self.command_collector = None
         self.direction = None
         self.dry_run = None
+        self.non_interactive = False
         
     def _get_trash_path(self):
         """
@@ -200,52 +201,59 @@ class WordPressSync:
             print("\nExisting files found in trash directory:")
             self._list_trash_contents()
             
-            while True:
-                response = input("\nWould you like to keep these files? (yes/no): ").lower()
-                if response in ["yes", "y"]:
-                    # Archive existing trash with timestamp
-                    timestamp = time.strftime(self.config["backup"].get("archive_format", "wordpress-sync-trash_%Y-%m-%d_%H%M%S"))
-                    archive_path = os.path.join(os.path.dirname(trash_dir), timestamp)
+            # In non-interactive mode, default to keeping existing trash files (safe default)
+            if self.non_interactive:
+                print("\nNon-interactive mode: keeping existing trash files (archiving).")
+                response = "yes"
+            else:
+                while True:
+                    response = input("\nWould you like to keep these files? (yes/no): ").lower()
+                    if response in ["yes", "y", "no", "n"]:
+                        break
+                    print("Please answer 'yes' or 'no'.")
+            
+            if response in ["yes", "y"]:
+                # Archive existing trash with timestamp
+                timestamp = time.strftime(self.config["backup"].get("archive_format", "wordpress-sync-trash_%Y-%m-%d_%H%M%S"))
+                archive_path = os.path.join(os.path.dirname(trash_dir), timestamp)
+                
+                if self.direction == "push" and not self.dry_run:
+                    # Archive on remote server - don't recreate trash directory
+                    mv_cmd = f"mv {trash_dir} {archive_path}"
+                    success, output = self.ssh_manager.execute_remote_command(mv_cmd)
                     
-                    if self.direction == "push" and not self.dry_run:
-                        # Archive on remote server - don't recreate trash directory
-                        mv_cmd = f"mv {trash_dir} {archive_path}"
-                        success, output = self.ssh_manager.execute_remote_command(mv_cmd)
-                        
-                        if not success:
-                            print(f"Failed to archive trash directory: {output}")
-                            return False
-                    else:
-                        # Archive on local system - don't recreate trash directory
-                        import shutil
-                        shutil.move(trash_dir, archive_path)
-                        
-                    print(f"Archived existing trash to: {archive_path}")
-                    return True
-                elif response in ["no", "n"]:
-                    # Remove existing trash
-                    if self.direction == "push" and not self.dry_run:
-                        # Remove entire trash directory on remote server
-                        rm_cmd = f"rm -rf {trash_dir} || true"
-                        success, output = self.ssh_manager.execute_remote_command(rm_cmd)
-                        
-                        if not success:
-                            print(f"Failed to remove trash directory: {output}")
-                            return False
-                            
-                        # Recreate the empty directory
-                        mkdir_cmd = f"mkdir -p {trash_dir}"
-                        self.ssh_manager.execute_remote_command(mkdir_cmd)
-                    else:
-                        # Remove entire trash directory on local system
-                        import shutil
-                        shutil.rmtree(trash_dir, ignore_errors=True)
-                        os.makedirs(trash_dir, exist_ok=True)
-                                
-                    print("Removed existing trash directory")
-                    return True
+                    if not success:
+                        print(f"Failed to archive trash directory: {output}")
+                        return False
                 else:
-                    print("Please answer 'yes' or 'no'")
+                    # Archive on local system - don't recreate trash directory
+                    import shutil
+                    shutil.move(trash_dir, archive_path)
+                    
+                print(f"Archived existing trash to: {archive_path}")
+                return True
+            elif response in ["no", "n"]:
+                # Remove existing trash
+                if self.direction == "push" and not self.dry_run:
+                    # Remove entire trash directory on remote server
+                    rm_cmd = f"rm -rf {trash_dir} || true"
+                    success, output = self.ssh_manager.execute_remote_command(rm_cmd)
+                    
+                    if not success:
+                        print(f"Failed to remove trash directory: {output}")
+                        return False
+                        
+                    # Recreate the empty directory
+                    mkdir_cmd = f"mkdir -p {trash_dir}"
+                    self.ssh_manager.execute_remote_command(mkdir_cmd)
+                else:
+                    # Remove entire trash directory on local system
+                    import shutil
+                    shutil.rmtree(trash_dir, ignore_errors=True)
+                    os.makedirs(trash_dir, exist_ok=True)
+                            
+                print("Removed existing trash directory")
+                return True
                     
         except Exception as e:
             print(f"Error handling existing trash: {e}")
@@ -301,46 +309,53 @@ class WordPressSync:
             print("\nThe following files were backed up during sync:")
             self._list_trash_contents()
             
-            while True:
-                response = input("\nWould you like to delete these backed up files? (yes/no): ").lower()
-                if response in ["yes", "y"]:
-                    if self.direction == "push" and not self.dry_run:
-                        # Remove on remote server - remove entire trash directory
-                        rm_cmd = f"rm -rf {trash_dir} || true"
-                        success, output = self.ssh_manager.execute_remote_command(rm_cmd)
-                        
-                        if not success:
-                            print(f"Failed to remove trash directory: {output}")
-                            return False
-                    else:
-                        # Remove on local system - remove entire trash directory
-                        import shutil
-                        shutil.rmtree(trash_dir, ignore_errors=True)
-                                
-                    print("Backed up files have been deleted")
-                    return True
-                elif response in ["no", "n"]:
-                    # Archive the trash directory with timestamp
-                    timestamp = time.strftime(self.config["backup"].get("archive_format", "wordpress-sync-trash_%Y-%m-%d_%H%M%S"))
-                    archive_path = os.path.join(os.path.dirname(trash_dir), timestamp)
+            # In non-interactive mode, default to keeping backups (safe default)
+            if self.non_interactive:
+                print("\nNon-interactive mode: keeping backed up files (archiving).")
+                response = "no"
+            else:
+                while True:
+                    response = input("\nWould you like to delete these backed up files? (yes/no): ").lower()
+                    if response in ["yes", "y", "no", "n"]:
+                        break
+                    print("Please answer 'yes' or 'no'.")
+            
+            if response in ["yes", "y"]:
+                if self.direction == "push" and not self.dry_run:
+                    # Remove on remote server - remove entire trash directory
+                    rm_cmd = f"rm -rf {trash_dir} || true"
+                    success, output = self.ssh_manager.execute_remote_command(rm_cmd)
                     
-                    if self.direction == "push" and not self.dry_run:
-                        # Archive on remote server - don't recreate trash directory
-                        mv_cmd = f"mv {trash_dir} {archive_path}"
-                        success, output = self.ssh_manager.execute_remote_command(mv_cmd)
-                        
-                        if not success:
-                            print(f"Failed to archive trash directory: {output}")
-                            return False
-                    else:
-                        # Archive on local system - don't recreate trash directory
-                        import shutil
-                        shutil.move(trash_dir, archive_path)
-                        
-                    print(f"Backed up files have been archived to: {archive_path}")
-                    return True
+                    if not success:
+                        print(f"Failed to remove trash directory: {output}")
+                        return False
                 else:
-                    print("Please answer 'yes' or 'no'")
+                    # Remove on local system - remove entire trash directory
+                    import shutil
+                    shutil.rmtree(trash_dir, ignore_errors=True)
+                            
+                print("Backed up files have been deleted")
+                return True
+            elif response in ["no", "n"]:
+                # Archive the trash directory with timestamp
+                timestamp = time.strftime(self.config["backup"].get("archive_format", "wordpress-sync-trash_%Y-%m-%d_%H%M%S"))
+                archive_path = os.path.join(os.path.dirname(trash_dir), timestamp)
+                
+                if self.direction == "push" and not self.dry_run:
+                    # Archive on remote server - don't recreate trash directory
+                    mv_cmd = f"mv {trash_dir} {archive_path}"
+                    success, output = self.ssh_manager.execute_remote_command(mv_cmd)
+                    
+                    if not success:
+                        print(f"Failed to archive trash directory: {output}")
+                        return False
+                else:
+                    # Archive on local system - don't recreate trash directory
+                    import shutil
+                    shutil.move(trash_dir, archive_path)
+                    
+                print(f"Backed up files have been archived to: {archive_path}")
+                return True
                     
         except Exception as e:
             print(f"Error handling final trash cleanup: {e}")
@@ -351,6 +366,12 @@ class WordPressSync:
         parser = argparse.ArgumentParser(
             description="WordPress Synchronization Tool",
             formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        )
+        
+        parser.add_argument(
+            "--version",
+            action="version",
+            version="%(prog)s 2.0.0"
         )
         
         parser.add_argument(
@@ -413,10 +434,33 @@ class WordPressSync:
             help="Only synchronize files, skip database operations"
         )
         
+        parser.add_argument(
+            "--non-interactive",
+            action="store_true",
+            help="Run without interactive prompts (for GUI/scripted use). "
+                 "In dry-run mode: exits after showing changes. "
+                 "In non-dry-run mode: auto-accepts safe defaults for all prompts."
+        )
+        
+        parser.add_argument(
+            "--extra-rsync-args",
+            default="",
+            help="Additional arguments to pass through to rsync (e.g., '--exclude-from=/path/to/file')"
+        )
+        
+        parser.add_argument(
+            "--itemize-changes",
+            action="store_true",
+            help="Add rsync's --itemize-changes flag for structured per-file change output"
+        )
+        
         self.args = parser.parse_args()
         
         # Set dry run flag (default is True, --no-dry-run makes it False)
         self.dry_run = not self.args.no_dry_run
+        
+        # Set non-interactive flag
+        self.non_interactive = self.args.non_interactive
         
         return self.args
 
@@ -443,6 +487,11 @@ class WordPressSync:
             # Command line argument (--no-trash) takes precedence over config
             if self.args.no_trash:
                 self.config["no_trash"] = True
+            
+            # Store runtime-only flags for rsync (underscore prefix = not from YAML)
+            self.config["_extra_rsync_args"] = self.args.extra_rsync_args
+            self.config["_itemize_changes"] = self.args.itemize_changes
+            self.config["_non_interactive"] = self.non_interactive
             
             # Initialize command collector if --command-only flag is used
             if self.args.command_only:
@@ -494,6 +543,11 @@ class WordPressSync:
             print("DRY RUN COMPLETED")
             print("="*80)
             print("\nThis was a dry run. No actual changes were made.")
+            
+            # In non-interactive mode, exit after dry run (GUI handles confirmation)
+            if self.non_interactive:
+                print("\nNon-interactive mode: exiting after dry run.")
+                return False
             
             while True:
                 response = input("\nDo you want to proceed with the actual synchronization? (yes/no): ").lower()
@@ -1384,6 +1438,31 @@ class WordPressSync:
             # Parse command line arguments
             self.parse_arguments()
             
+            # In non-interactive mode, redirect stdin to /dev/null so that
+            # all child processes (ssh, scp, rsync, wp-cli, etc.) get EOF
+            # instead of inheriting a pipe from the parent (GUI) that they
+            # might try to read from and hang.
+            if self.non_interactive:
+                devnull = open(os.devnull, 'r')
+                os.dup2(devnull.fileno(), sys.stdin.fileno())
+                devnull.close()
+                
+                # Safety net: override builtins.input() so any uncaught
+                # input() call returns a safe default instead of raising
+                # EOFError from /dev/null.
+                import builtins
+                def _non_interactive_input(prompt=''):
+                    # For backup-related prompts, default to "yes" (safe = keep data)
+                    # For everything else, default to "no" (safe = don't proceed)
+                    prompt_lower = prompt.lower()
+                    if 'backup' in prompt_lower or 'keep' in prompt_lower or 'archive' in prompt_lower:
+                        answer = 'yes'
+                    else:
+                        answer = 'no'
+                    print(f"{prompt}[non-interactive: auto-responding '{answer}']")
+                    return answer
+                builtins.input = _non_interactive_input
+            
             # Set environment variable for skipping WordPress installation check
             if self.args.skip_wp_check:
                 os.environ['WORDPRESS_SYNC_SKIP_WP_CHECK'] = 'true'
@@ -1426,6 +1505,11 @@ class WordPressSync:
             return 1
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the wordpress-sync CLI tool."""
     wordpress_sync = WordPressSync()
     sys.exit(wordpress_sync.run())
+
+
+if __name__ == "__main__":
+    main()

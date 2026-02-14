@@ -42,6 +42,9 @@ wordpress-sync
 ehthumbs.db
 Thumbs.db
 
+# AI tools
+.opencode/
+
 # WordPress Sync specific
 /tmp/
 *.sql
