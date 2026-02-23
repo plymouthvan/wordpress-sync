@@ -37,7 +37,7 @@
     'Plugin Management',
     'Validation',
     'Maintenance Mode Off',
-    'Trash Management',
+    'Backup Management',
     'Cleanup',
   ];
 

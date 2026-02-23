@@ -15,7 +15,13 @@ operation:
 paths:
   local: /path/to/local/site/
   live: /path/to/live/site/
-  db_temp: ../wordpress-sync-tmp-db/
+  # DB temp directory for export/import staging. Relative paths resolve against each site's root.
+  # New format (recommended) — separate paths for local and remote:
+  db_temp:
+    local: "../wordpress-sync-tmp-db/"
+    remote: "../wordpress-sync-tmp-db/"
+  # Old format (still supported) — single string used for both local and remote:
+  # db_temp: ../wordpress-sync-tmp-db/
   db_filename: wordpress-sync-database.sql
 
 ownership:
@@ -62,12 +68,21 @@ rsync:
 
 backup:
   enabled: true  # Enable backup of deleted/modified files during rsync
-  directory: "../wordpress-sync-trash"  # Path to backup directory (relative to local/live paths)
-  archive_format: "wordpress-sync-trash_%Y-%m-%d_%H%M%S"  # Format for archive names when keeping old trash
+  # Unified backup directory. All backups (files, archives, database) are stored
+  # under this root with subdirectories: latest/, archives/, db/
+  # Accepts relative paths (resolved against site root) or absolute paths.
+  # New format (recommended) — separate paths for local and remote:
+  directory:
+    local: "../wordpress-sync-backups"
+    remote: "../wordpress-sync-backups"
+  # Old format (still supported) — single string used for both local and remote:
+  # directory: "../wordpress-sync-backups"
+  archive_format: "wordpress-sync-backup_%Y-%m-%d_%H%M%S"  # Format for archive names when rotating backups
   cleanup_prompt: true  # Whether to prompt for cleanup after sync
   database:
     enabled: true  # Enable database backups before reset
-    directory: "../wordpress-sync-db-backups"  # Path to store database backups (relative to local/live paths)
+    # Note: DB backups are now stored at <backup_dir>/db/ automatically.
+    # The old 'directory' field is deprecated but still supported for backwards compatibility.
     filename_format: "db-backup_%Y-%m-%d_%H%M%S.sql"  # Format for backup filenames
 
 domains:

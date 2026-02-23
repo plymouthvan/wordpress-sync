@@ -9,14 +9,14 @@
   } from '$lib/stores/sync';
   import type { SyncStep, DiffEntry } from '$lib/types';
   import { createDryRunCommand, createSyncCommand, createBackupCommand, type SyncOptions, type BackupOptions } from '$lib/services/cli';
-  import { getSiteConfigPath, loadSiteConfig } from '$lib/services/config';
+  import { getSiteConfigPath, loadSiteConfig, normalizeBackupConfig, normalizeDbTempConfig } from '$lib/services/config';
   import type { SiteConfig } from '$lib/types';
   import { saveHistoryEntry } from '$lib/services/history';
   import { refreshSiteList } from '$lib/stores/sites';
   import { parseItemizeChanges } from '$lib/utils/diffParser';
   import { parseRsyncProgress, parseStepMarker, isInteractivePrompt, stripAnsi } from '$lib/utils/outputParser';
   import { termCommand, termStdout, termStderr, termError, termInfo, termSuccess, terminalOpen } from '$lib/stores/terminal';
-  import { checkTrashHasContents, deleteTrashContents, archiveTrashContents } from '$lib/services/backup';
+  import { checkLatestHasContents, deleteLatestContents, archiveLatestContents, resolveDbBackupDir } from '$lib/services/backup';
   import DiffViewer from '$lib//../components/sync/DiffViewer.svelte';
   import StepTracker from '$lib//../components/sync/StepTracker.svelte';
   import LogOutput from '$lib//../components/sync/LogOutput.svelte';
@@ -71,7 +71,7 @@
   let skipDryRun = $state(false);
   let skipValidation = $state(false);
   let skipWpCheck = $state(false);
-  let noTrash = $state(false);
+  let noBackup = $state(false);
 
   // Site config for backup status
   let siteConfig = $state<SiteConfig | null>(null);
@@ -94,7 +94,7 @@
       siteConfigLoaded = true;
       siteConfigLoading = true;
       loadSiteConfig(site).then((cfg) => {
-        siteConfig = cfg;
+        siteConfig = normalizeDbTempConfig(normalizeBackupConfig(cfg));
         siteConfigLoading = false;
       }).catch(() => {
         siteConfigLoading = false;
@@ -109,7 +109,8 @@
     backupResult = null;
     terminalOpen.set(true);
 
-    const backupDir = siteConfig.backup?.database?.directory || 'db-backups';
+    const location = direction === 'push' ? 'remote' as const : 'local' as const;
+    const backupDir = resolveDbBackupDir(siteConfig, location);
     const filenameFormat = siteConfig.backup?.database?.filename_format || 'manual-backup-%Y%m%d-%H%M%S.sql';
 
     const opts: BackupOptions = {
@@ -221,7 +222,7 @@
       syncType,
       skipValidation,
       skipWpCheck,
-      noTrash,
+      noBackup,
     };
   }
 
@@ -499,7 +500,7 @@
         const _code = code;
         const _logSnapshot = logLines.join('\n');
         // Capture values for async closures
-        const _noTrash = noTrash;
+        const _noBackup = noBackup;
         const _siteConfig = siteConfig;
 
         (async () => {
@@ -524,12 +525,12 @@
           }
         })();
 
-        // Post-sync trash cleanup prompt (only on success, when trash is enabled)
-        if (_code === 0 && !_noTrash && _siteConfig?.backup?.cleanup_prompt) {
+        // Post-sync backup cleanup prompt (only on success, when backup is enabled)
+        if (_code === 0 && !_noBackup && _siteConfig?.backup?.cleanup_prompt) {
           (async () => {
             try {
               const cfg = _siteConfig!;
-              const { hasContents, fileCount } = await checkTrashHasContents(cfg, _direction);
+              const { hasContents, fileCount } = await checkLatestHasContents(cfg, _direction);
               if (!hasContents) return;
 
               const dest = _direction === 'push' ? 'remote server' : 'local system';
@@ -547,7 +548,7 @@
 
               if (shouldDelete) {
                 termInfo('Cleaning up backed-up files...');
-                const result = await deleteTrashContents(cfg, _direction);
+                const result = await deleteLatestContents(cfg, _direction);
                 if (result.success) {
                   const verb = result.trashed ? 'Moved to Trash' : 'Deleted';
                   termSuccess(`${verb} backed-up files`);
@@ -556,7 +557,7 @@
                 }
               } else {
                 termInfo('Archiving backed-up files...');
-                const result = await archiveTrashContents(cfg, _direction);
+                const result = await archiveLatestContents(cfg, _direction);
                 if (result.success) {
                   termSuccess(`Archived to: ${result.archivePath}`);
                 } else {
@@ -797,8 +798,8 @@
             Skip WP Check
           </label>
           <label class="checkbox-option">
-            <input type="checkbox" bind:checked={noTrash} />
-            No Trash (permanent delete)
+            <input type="checkbox" bind:checked={noBackup} />
+            Skip File Backup (no safety copies)
           </label>
         </div>
       </div>
@@ -825,10 +826,10 @@
           <div class="backup-status-row">
             <div class="backup-indicator" class:enabled={fileBackupEnabled} class:disabled={!fileBackupEnabled}>
               <span class="indicator-icon">{fileBackupEnabled ? '\u2713' : '\u2717'}</span>
-              <span class="indicator-label">File Backup (rsync trash)</span>
+              <span class="indicator-label">File Backup</span>
               <span class="indicator-value">{fileBackupEnabled ? 'Enabled' : 'Disabled'}</span>
-              {#if noTrash && fileBackupEnabled}
-                <span class="indicator-override">Overridden by "No Trash" option above</span>
+              {#if noBackup && fileBackupEnabled}
+                <span class="indicator-override">Overridden by "Skip File Backup" option above</span>
               {/if}
             </div>
             <div class="backup-indicator" class:enabled={dbBackupEnabled} class:disabled={!dbBackupEnabled}>
@@ -848,7 +849,7 @@
             <button
               class="btn btn-backup"
               onclick={() => onNavigate?.(`config:${$selectedSite}:backup`)}
-              title="Open Backup & Trash settings"
+              title="Open Backup settings"
             >
               <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
                 <path d="M8.5 1.5l2 2L4 10H2v-2l6.5-6.5z" />

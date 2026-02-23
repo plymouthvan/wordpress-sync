@@ -259,7 +259,9 @@ class MaintenanceManager:
                 ssh_manager = SSHManager(self.config)
                 
                 # Create temporary file locally
-                temp_file = os.path.join(self.config["paths"]["db_temp"], ".maintenance")
+                raw_db_temp = self.config["paths"]["db_temp"]
+                local_db_temp = raw_db_temp.get("local", "/tmp") if isinstance(raw_db_temp, dict) else raw_db_temp
+                temp_file = os.path.join(local_db_temp, ".maintenance")
                 with open(temp_file, "w") as f:
                     f.write(maintenance_content)
                 

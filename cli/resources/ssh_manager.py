@@ -90,7 +90,7 @@ class SSHManager:
         options.append(f"--chmod=F{chmod_files},D{chmod_dirs}")
 
         # Backup options - only add if not explicitly disabled
-        if not self.config.get("no_trash", False):
+        if not self.config.get("no_backup", False) and not self.config.get("no_trash", False):
             # Get the backup directory path
             backup_dir = self._get_backup_dir(self.config)
             if backup_dir:
@@ -402,6 +402,12 @@ class SSHManager:
         """
         Get the backup directory path based on configuration and direction.
         
+        Supports both old format (backup.directory is a string) and new format
+        (backup.directory is a dict with 'local' and 'remote' keys).
+        
+        For the new format, rsync's --backup-dir targets <root>/latest/.
+        For the old format, it targets the directory directly (backwards compat).
+        
         Returns:
             str: Path to the backup directory, or None if backup is disabled.
         """
@@ -409,21 +415,41 @@ class SSHManager:
         if "backup" not in config or not config["backup"].get("enabled", True):
             return None
             
-        # Get the backup directory from config or use default
-        backup_dir = config["backup"].get("directory", "../.trash")
+        raw_dir = config["backup"].get("directory", "../.backup")
+        
+        # Detect new format (dict with local/remote) vs old format (string)
+        is_new_format = isinstance(raw_dir, dict)
         
         # Determine the base path based on direction
         if hasattr(self, 'direction') and self.direction:
             base_path = self.live_path if self.direction == "push" else self.local_path
         else:
-            # If direction is not set yet, we'll determine it later
             base_path = None
+        
+        if is_new_format:
+            # New format: extract the right key based on direction
+            if hasattr(self, 'direction') and self.direction:
+                dir_key = "remote" if self.direction == "push" else "local"
+            else:
+                dir_key = "remote"  # default to remote if direction unknown
+            backup_dir = raw_dir.get(dir_key, "../wordpress-sync-backups")
+        else:
+            backup_dir = raw_dir if raw_dir else "../.backup"
             
-        # If base_path is available, resolve the backup directory path
-        if base_path:
-            # If backup_dir is relative, make it relative to the base path
-            if not os.path.isabs(backup_dir):
-                backup_dir = os.path.normpath(os.path.join(os.path.dirname(base_path), backup_dir))
+        # Resolve relative paths against the base path
+        if base_path and not os.path.isabs(backup_dir):
+            if backup_dir.startswith('../'):
+                # For ../ paths: resolve against the parent of the base path
+                parent_dir = os.path.dirname(base_path.rstrip('/'))
+                relative_path = backup_dir[3:]
+                backup_dir = os.path.join(parent_dir, relative_path)
+            else:
+                # For other relative paths: resolve against the base path itself
+                backup_dir = os.path.join(base_path.rstrip('/'), backup_dir)
+        
+        # For new format, rsync targets the latest/ subdirectory
+        if is_new_format:
+            backup_dir = os.path.join(backup_dir, "latest")
                 
         return backup_dir
         
@@ -497,7 +523,7 @@ class SSHManager:
                 self._cleanup_destination_files(direction, sudo_password=sudo_password)
                 
             # Ensure backup directory exists if backup is enabled
-            if not self.config.get("no_trash", False) and not dry_run:
+            if not self.config.get("no_backup", False) and not self.config.get("no_trash", False) and not dry_run:
                 self._ensure_backup_dir_exists(direction)
             
             # Build rsync command

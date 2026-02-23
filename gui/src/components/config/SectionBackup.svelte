@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { open } from '@tauri-apps/plugin-dialog';
   import type { SiteConfig } from '$lib/types';
+  import { getBackupRootDir, getLatestDir, getArchivesDir, getDbBackupDir } from '$lib/services/backup';
 
   interface Props {
     config: SiteConfig;
@@ -8,12 +10,76 @@
 
   let { config, onchange }: Props = $props();
 
+  async function browseLocalPath() {
+    const selected = await open({
+      multiple: false,
+      title: 'Select Local Backup Directory',
+      directory: true,
+    });
+    if (selected) {
+      updateLocalPath(selected as string);
+    }
+  }
+
+  // Extract local/remote paths from the directory (handles both new and legacy formats)
+  let localPath = $derived(
+    typeof config.backup.directory === 'object' && config.backup.directory !== null
+      ? config.backup.directory.local
+      : (typeof config.backup.directory === 'string' ? config.backup.directory : '')
+  );
+  let remotePath = $derived(
+    typeof config.backup.directory === 'object' && config.backup.directory !== null
+      ? config.backup.directory.remote
+      : (typeof config.backup.directory === 'string' ? config.backup.directory : '')
+  );
+
+  // Resolved path previews
+  let previewLocalRoot = $derived(config.paths.local ? getBackupRootDir(config, 'local') : '');
+  let previewLocalLatest = $derived(config.paths.local ? getLatestDir(config, 'local') : '');
+  let previewLocalArchives = $derived(config.paths.local ? getArchivesDir(config, 'local') : '');
+  let previewLocalDb = $derived(config.paths.local ? getDbBackupDir(config, 'local') : '');
+
+  let previewRemoteRoot = $derived(config.paths.live ? getBackupRootDir(config, 'remote') : '');
+  let previewRemoteLatest = $derived(config.paths.live ? getLatestDir(config, 'remote') : '');
+  let previewRemoteArchives = $derived(config.paths.live ? getArchivesDir(config, 'remote') : '');
+  let previewRemoteDb = $derived(config.paths.live ? getDbBackupDir(config, 'remote') : '');
+
   function updateTop(key: 'enabled' | 'cleanup_prompt', value: boolean) {
     onchange({ ...config, backup: { ...config.backup, [key]: value } });
   }
 
-  function updateTopString(key: 'directory' | 'archive_format', value: string) {
-    onchange({ ...config, backup: { ...config.backup, [key]: value } });
+  function updateArchiveFormat(value: string) {
+    onchange({ ...config, backup: { ...config.backup, archive_format: value } });
+  }
+
+  function updateLocalPath(value: string) {
+    const currentDir = config.backup.directory;
+    const remote = typeof currentDir === 'object' && currentDir !== null
+      ? currentDir.remote
+      : (typeof currentDir === 'string' ? currentDir : '../wordpress-sync-backups');
+
+    onchange({
+      ...config,
+      backup: {
+        ...config.backup,
+        directory: { local: value, remote },
+      }
+    });
+  }
+
+  function updateRemotePath(value: string) {
+    const currentDir = config.backup.directory;
+    const local = typeof currentDir === 'object' && currentDir !== null
+      ? currentDir.local
+      : (typeof currentDir === 'string' ? currentDir : '../wordpress-sync-backups');
+
+    onchange({
+      ...config,
+      backup: {
+        ...config.backup,
+        directory: { local, remote: value },
+      }
+    });
   }
 
   function updateDb(key: 'enabled', value: boolean) {
@@ -26,12 +92,12 @@
     });
   }
 
-  function updateDbString(key: 'directory' | 'filename_format', value: string) {
+  function updateDbFilenameFormat(value: string) {
     onchange({
       ...config,
       backup: {
         ...config.backup,
-        database: { ...config.backup.database, [key]: value }
+        database: { ...config.backup.database, filename_format: value }
       }
     });
   }
@@ -60,27 +126,77 @@
     </label>
   </div>
 
-  <div class="form-grid">
-    <div class="field">
-      <label for="backup-dir">Backup Directory</label>
-      <input
-        id="backup-dir"
-        type="text"
-        value={config.backup.directory}
-        oninput={(e) => updateTopString('directory', e.currentTarget.value)}
-        placeholder="backups/"
-      />
+  <!-- Unified Backup Directory -->
+  <div class="directory-section">
+    <div class="section-header">
+      <span class="section-title">Backup Directory</span>
+      <span class="section-hint">Relative paths are resolved against each site's root. Absolute paths are used as-is.</span>
     </div>
 
+    <div class="form-grid">
+      <div class="field">
+        <label for="backup-dir-local">Local Path</label>
+        <div class="input-with-button">
+          <input
+            id="backup-dir-local"
+            type="text"
+            value={localPath}
+            oninput={(e) => updateLocalPath(e.currentTarget.value)}
+            placeholder="../wordpress-sync-backups"
+          />
+          <button type="button" class="btn-browse" onclick={browseLocalPath}>Browse</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="backup-dir-remote">Remote Path</label>
+        <input
+          id="backup-dir-remote"
+          type="text"
+          value={remotePath}
+          oninput={(e) => updateRemotePath(e.currentTarget.value)}
+          placeholder="../wordpress-sync-backups"
+        />
+      </div>
+    </div>
+
+    <!-- Resolved Path Preview -->
+    {#if previewLocalRoot || previewRemoteRoot}
+      <div class="path-preview">
+        <span class="preview-label">Resolved structure:</span>
+        {#if previewLocalRoot}
+          <div class="preview-tree">
+            <span class="preview-heading">Local</span>
+            <code class="preview-path root">{previewLocalRoot}/</code>
+            <code class="preview-path sub">latest/</code>
+            <code class="preview-path sub">archives/</code>
+            <code class="preview-path sub">db/</code>
+          </div>
+        {/if}
+        {#if previewRemoteRoot}
+          <div class="preview-tree">
+            <span class="preview-heading">Remote</span>
+            <code class="preview-path root">{previewRemoteRoot}/</code>
+            <code class="preview-path sub">latest/</code>
+            <code class="preview-path sub">archives/</code>
+            <code class="preview-path sub">db/</code>
+          </div>
+        {/if}
+      </div>
+    {/if}
+  </div>
+
+  <div class="form-grid">
     <div class="field">
       <label for="backup-archive">Archive Name Format</label>
       <input
         id="backup-archive"
         type="text"
         value={config.backup.archive_format}
-        oninput={(e) => updateTopString('archive_format', e.currentTarget.value)}
-        placeholder="backup-%Y%m%d-%H%M%S.tar.gz"
+        oninput={(e) => updateArchiveFormat(e.currentTarget.value)}
+        placeholder="wordpress-sync-backup_%Y-%m-%d_%H%M%S"
       />
+      <span class="field-hint">Tokens: %Y (year), %m (month), %d (day), %H (hour), %M (min), %S (sec)</span>
     </div>
   </div>
 
@@ -102,25 +218,15 @@
 
   <div class="form-grid">
     <div class="field">
-      <label for="db-backup-dir">DB Backup Directory</label>
-      <input
-        id="db-backup-dir"
-        type="text"
-        value={config.backup.database.directory}
-        oninput={(e) => updateDbString('directory', e.currentTarget.value)}
-        placeholder="db-backups/"
-      />
-    </div>
-
-    <div class="field">
       <label for="db-backup-filename">DB Backup Filename Format</label>
       <input
         id="db-backup-filename"
         type="text"
         value={config.backup.database.filename_format}
-        oninput={(e) => updateDbString('filename_format', e.currentTarget.value)}
-        placeholder="db-%Y%m%d-%H%M%S.sql"
+        oninput={(e) => updateDbFilenameFormat(e.currentTarget.value)}
+        placeholder="db-backup_%Y-%m-%d_%H%M%S.sql"
       />
+      <span class="field-hint">DB backups are stored at &lt;backup_dir&gt;/db/ automatically.</span>
     </div>
   </div>
 </div>
@@ -205,6 +311,117 @@
     box-shadow: 0 0 0 3px var(--accent-subtle);
   }
 
+  /* Directory Section */
+  .directory-section {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+  }
+
+  .section-header {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .section-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .section-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.4;
+  }
+
+  /* Path Preview */
+  .path-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+  }
+
+  .preview-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .preview-tree {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .preview-heading {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 2px;
+  }
+
+  .preview-path {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.6;
+  }
+
+  .preview-path.root {
+    color: var(--text-secondary);
+  }
+
+  .preview-path.sub {
+    padding-left: 16px;
+  }
+
+  .preview-path.sub::before {
+    content: '\251C\2500 ';
+    color: var(--border-color);
+  }
+
+  .preview-path.sub:last-child::before {
+    content: '\2514\2500 ';
+  }
+
+  .input-with-button {
+    display: flex;
+    gap: 8px;
+  }
+
+  .input-with-button input {
+    flex: 1;
+  }
+
+  .btn-browse {
+    padding: 8px 16px;
+    background: var(--bg-hover);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+  }
+
+  .btn-browse:hover {
+    background: var(--border-color);
+    color: var(--text-primary);
+  }
+
   .form-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -227,6 +444,12 @@
 
   .field input[type='text'] {
     width: 100%;
+  }
+
+  .field-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.3;
   }
 
   .field-separator {

@@ -12,8 +12,50 @@
   let validating = $state(false);
   let validateResult = $state<'idle' | 'success' | 'error'>('idle');
 
-  function update(key: keyof SiteConfig['paths'], value: string) {
+  function update(key: 'local' | 'live' | 'db_filename', value: string) {
     onchange({ ...config, paths: { ...config.paths, [key]: value } });
+  }
+
+  // Extract local/remote db_temp (handles both new and legacy formats)
+  let localDbTemp = $derived(
+    typeof config.paths.db_temp === 'object' && config.paths.db_temp !== null
+      ? config.paths.db_temp.local
+      : (typeof config.paths.db_temp === 'string' ? config.paths.db_temp : '')
+  );
+  let remoteDbTemp = $derived(
+    typeof config.paths.db_temp === 'object' && config.paths.db_temp !== null
+      ? config.paths.db_temp.remote
+      : (typeof config.paths.db_temp === 'string' ? config.paths.db_temp : '')
+  );
+
+  function updateLocalDbTemp(value: string) {
+    const current = config.paths.db_temp;
+    const remote = typeof current === 'object' && current !== null
+      ? current.remote
+      : (typeof current === 'string' ? current : '/tmp');
+
+    onchange({
+      ...config,
+      paths: {
+        ...config.paths,
+        db_temp: { local: value, remote },
+      }
+    });
+  }
+
+  function updateRemoteDbTemp(value: string) {
+    const current = config.paths.db_temp;
+    const local = typeof current === 'object' && current !== null
+      ? current.local
+      : (typeof current === 'string' ? current : '/tmp');
+
+    onchange({
+      ...config,
+      paths: {
+        ...config.paths,
+        db_temp: { local, remote: value },
+      }
+    });
   }
 
   async function browseLocalPath() {
@@ -24,6 +66,17 @@
     });
     if (selected) {
       update('local', selected as string);
+    }
+  }
+
+  async function browseLocalDbTemp() {
+    const selected = await open({
+      multiple: false,
+      title: 'Select Local DB Temp Directory',
+      directory: true
+    });
+    if (selected) {
+      updateLocalDbTemp(selected as string);
     }
   }
 
@@ -51,54 +104,90 @@
   }
 </script>
 
-<div class="form-grid">
-  <div class="field full-width">
-    <label for="paths-local">Local WordPress Path</label>
-    <div class="input-with-button">
+<div class="form-layout">
+  <!-- WordPress Paths -->
+  <div class="section-group">
+    <span class="group-label">WordPress Directories</span>
+
+    <div class="field full-width">
+      <label for="paths-local">Local WordPress Path</label>
+      <div class="input-with-button">
+        <input
+          id="paths-local"
+          type="text"
+          value={config.paths.local}
+          oninput={(e) => update('local', e.currentTarget.value)}
+          placeholder="/var/www/html"
+        />
+        <button type="button" class="btn-browse" onclick={browseLocalPath}>Browse</button>
+      </div>
+    </div>
+
+    <div class="field full-width">
+      <label for="paths-live">Remote (Live) WordPress Path</label>
       <input
-        id="paths-local"
+        id="paths-live"
         type="text"
-        value={config.paths.local}
-        oninput={(e) => update('local', e.currentTarget.value)}
+        value={config.paths.live}
+        oninput={(e) => update('live', e.currentTarget.value)}
         placeholder="/var/www/html"
       />
-      <button type="button" class="btn-browse" onclick={browseLocalPath}>Browse</button>
     </div>
   </div>
 
-  <div class="field full-width">
-    <label for="paths-live">Live WordPress Path</label>
-    <input
-      id="paths-live"
-      type="text"
-      value={config.paths.live}
-      oninput={(e) => update('live', e.currentTarget.value)}
-      placeholder="/var/www/html"
-    />
+  <!-- DB Temp Directories -->
+  <div class="section-group">
+    <div class="group-header">
+      <span class="group-label">Database Temp Directories</span>
+      <span class="group-hint">Staging area for DB export/import. Relative paths resolve against each site's root.</span>
+    </div>
+
+    <div class="form-grid">
+      <div class="field">
+        <label for="paths-db-temp-local">Local DB Temp</label>
+        <div class="input-with-button">
+          <input
+            id="paths-db-temp-local"
+            type="text"
+            value={localDbTemp}
+            oninput={(e) => updateLocalDbTemp(e.currentTarget.value)}
+            placeholder="/tmp"
+          />
+          <button type="button" class="btn-browse" onclick={browseLocalDbTemp}>Browse</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="paths-db-temp-remote">Remote DB Temp</label>
+        <input
+          id="paths-db-temp-remote"
+          type="text"
+          value={remoteDbTemp}
+          oninput={(e) => updateRemoteDbTemp(e.currentTarget.value)}
+          placeholder="/tmp"
+        />
+      </div>
+    </div>
   </div>
 
-  <div class="field">
-    <label for="paths-db-temp">DB Temp Directory</label>
-    <input
-      id="paths-db-temp"
-      type="text"
-      value={config.paths.db_temp}
-      oninput={(e) => update('db_temp', e.currentTarget.value)}
-      placeholder="/tmp"
-    />
+  <!-- DB Filename -->
+  <div class="section-group">
+    <div class="form-grid">
+      <div class="field">
+        <label for="paths-db-filename">DB Export Filename</label>
+        <input
+          id="paths-db-filename"
+          type="text"
+          value={config.paths.db_filename}
+          oninput={(e) => update('db_filename', e.currentTarget.value)}
+          placeholder="database.sql"
+        />
+        <span class="field-hint">Name of the SQL dump file used during sync. Same name is used on both local and remote.</span>
+      </div>
+    </div>
   </div>
 
-  <div class="field">
-    <label for="paths-db-filename">DB Filename</label>
-    <input
-      id="paths-db-filename"
-      type="text"
-      value={config.paths.db_filename}
-      oninput={(e) => update('db_filename', e.currentTarget.value)}
-      placeholder="database.sql"
-    />
-  </div>
-
+  <!-- Validate -->
   <div class="field full-width action-row">
     <button type="button" class="btn-action" onclick={validatePaths} disabled={validating}>
       {#if validating}
@@ -116,11 +205,43 @@
 </div>
 
 <style>
+  .form-layout {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    padding-top: 12px;
+  }
+
+  .section-group {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .group-header {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .group-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .group-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.4;
+  }
+
   .form-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 16px;
-    padding-top: 12px;
   }
 
   .full-width {
@@ -143,6 +264,12 @@
 
   .field input {
     width: 100%;
+  }
+
+  .field-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.3;
   }
 
   .input-with-button {

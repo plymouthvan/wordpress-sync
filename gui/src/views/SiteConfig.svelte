@@ -2,7 +2,7 @@
   import { onMount, tick } from 'svelte';
   import YAML from 'yaml';
   import { selectedSite } from '$lib/stores/sites';
-  import { loadSiteConfig, saveSiteConfig } from '$lib/services/config';
+  import { loadSiteConfig, saveSiteConfig, normalizeBackupConfig, normalizeDbTempConfig } from '$lib/services/config';
   import type { SiteConfig } from '$lib/types';
   import CollapsibleSection from '../components/config/CollapsibleSection.svelte';
   import SectionSSH from '../components/config/SectionSSH.svelte';
@@ -25,7 +25,7 @@
   const DEFAULT_CONFIG: SiteConfig = {
     name: '',
     ssh: { user: '', host: '', port: 22, key_path: '', sudo: { user: '', key_path: '' } },
-    paths: { local: '', live: '', db_temp: '/tmp', db_filename: 'database.sql' },
+    paths: { local: '', live: '', db_temp: { local: '/tmp', remote: '/tmp' }, db_filename: 'database.sql' },
     domains: {
       staging: { http: '', https: '' },
       live: { http: '', https: '' }
@@ -44,12 +44,11 @@
     ownership: { user: 'www-data', group: 'www-data' },
     backup: {
       enabled: true,
-      directory: 'backups/',
-      archive_format: 'wordpress-sync-trash_%Y-%m-%d_%H%M%S',
+      directory: { local: '../wordpress-sync-backups', remote: '../wordpress-sync-backups' },
+      archive_format: 'wordpress-sync-backup_%Y-%m-%d_%H%M%S',
       cleanup_prompt: true,
       database: {
         enabled: true,
-        directory: 'db-backups/',
         filename_format: 'db-%Y%m%d-%H%M%S.sql'
       }
     },
@@ -154,8 +153,9 @@
 
     try {
       const loaded = await loadSiteConfig(siteName);
-      config = deepMergeConfig(DEFAULT_CONFIG, loaded);
-      config.name = siteName;
+      let merged = deepMergeConfig(DEFAULT_CONFIG, loaded);
+      merged.name = siteName;
+      config = normalizeDbTempConfig(normalizeBackupConfig(merged));
       savedConfigJson = JSON.stringify(config);
     } catch (e) {
       console.warn('Failed to load config, using defaults:', e);
@@ -329,7 +329,7 @@
           </div>
 
           <div data-section="backup">
-            <CollapsibleSection title="Backup & Trash" bind:open={backupOpen}>
+            <CollapsibleSection title="Backups" bind:open={backupOpen}>
               <SectionBackup {config} onchange={updateConfig} />
             </CollapsibleSection>
           </div>

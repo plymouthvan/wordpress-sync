@@ -51,133 +51,214 @@ class WordPressSync:
         self.dry_run = None
         self.non_interactive = False
         
-    def _get_trash_path(self):
+    def _is_new_backup_format(self):
+        """Check if the config uses the new unified backup directory format (dict with local/remote)."""
+        if "backup" not in self.config:
+            return False
+        return isinstance(self.config["backup"].get("directory"), dict)
+
+    def _resolve_backup_root(self, direction=None):
         """
-        Get the path to the trash directory.
+        Get the resolved backup root directory path.
         
+        Supports both old format (backup.directory is a string) and new format
+        (backup.directory is a dict with 'local' and 'remote' keys).
+        
+        Args:
+            direction: Override direction. Uses self.direction if not provided.
+            
         Returns:
-            str: Path to the trash directory.
+            str: Resolved backup root directory path.
         """
-        # Get the backup directory from config or use default
         if "backup" not in self.config:
             self.config["backup"] = {}
             
-        backup_dir = self.config["backup"].get("directory", "../.trash")
+        dir_val = direction or self.direction
+        raw_dir = self.config["backup"].get("directory", "../.backup")
+        
+        if isinstance(raw_dir, dict):
+            # New format: extract the right key based on direction
+            dir_key = "remote" if dir_val == "push" else "local"
+            backup_dir = raw_dir.get(dir_key, "../wordpress-sync-backups")
+        else:
+            backup_dir = raw_dir if raw_dir else "../.backup"
         
         # Determine the base path based on direction
-        base_path = self.config["paths"]["live"] if self.direction == "push" else self.config["paths"]["local"]
+        base_path = self.config["paths"]["live"] if dir_val == "push" else self.config["paths"]["local"]
         
-        # If backup_dir is relative, make it relative to the base path
+        # Resolve relative paths
         if not os.path.isabs(backup_dir):
-            # For relative paths that start with ../
             if backup_dir.startswith('../'):
-                # Get the parent directory of the WordPress directory
                 parent_dir = os.path.dirname(base_path.rstrip('/'))
-                # Remove the ../ prefix from backup_dir
                 relative_path = backup_dir[3:]
-                # Join the parent directory with the remaining path
                 backup_dir = os.path.join(parent_dir, relative_path)
-                
-                # For push operations, ensure the path is properly formatted for remote server
-                if self.direction == "push" and not self.dry_run:
-                    # Log the resolved path for debugging
-                    print(f"Resolved trash directory path: {backup_dir}")
             else:
-                # For other relative paths, join with base_path
-                backup_dir = os.path.join(base_path, backup_dir)
+                backup_dir = os.path.join(base_path.rstrip('/'), backup_dir)
             
         return backup_dir
-        
-    def _list_trash_contents(self):
+
+    def _get_latest_backup_path(self):
         """
-        List the contents of the trash directory.
+        Get the path to the latest backup directory.
+        
+        New format: <backup_root>/latest (with fallback to <backup_root>/trash for backward compat)
+        Old format: <backup_root> (the root IS the backup dir)
+        
+        Returns:
+            str: Path to the latest backup directory.
+        """
+        root = self._resolve_backup_root()
+        if self._is_new_backup_format():
+            return os.path.join(root, "latest")
+        return root
+    
+    def _get_archives_path(self):
+        """
+        Get the path to the archives directory.
+        
+        New format: <backup_root>/archives
+        Old format: parent of the trash dir (old behavior)
+        
+        Returns:
+            str: Path to the archives directory.
+        """
+        if self._is_new_backup_format():
+            return os.path.join(self._resolve_backup_root(), "archives")
+        # Old format: archives live in the parent of the latest backup dir
+        return os.path.dirname(self._get_latest_backup_path())
+
+    def _resolve_local_db_temp(self):
+        """
+        Get the resolved local DB temp directory path.
+
+        Supports both old format (db_temp is a string) and new format
+        (db_temp is a dict with 'local' and 'remote' keys).
+
+        Returns:
+            str: Resolved absolute path to the local DB temp directory.
+        """
+        raw = self.config["paths"]["db_temp"]
+        db_temp = raw.get("local", "/tmp") if isinstance(raw, dict) else raw
+        base_path = self.config["paths"]["local"]
+
+        if os.path.isabs(db_temp):
+            return db_temp
+        if db_temp.startswith('../'):
+            parent_dir = os.path.dirname(base_path.rstrip('/'))
+            return os.path.join(parent_dir, db_temp[3:])
+        return os.path.join(base_path.rstrip('/'), db_temp)
+
+    def _resolve_remote_db_temp(self):
+        """
+        Get the resolved remote DB temp directory path.
+
+        Supports both old format (db_temp is a string) and new format
+        (db_temp is a dict with 'local' and 'remote' keys).
+
+        Returns:
+            str: Resolved absolute path to the remote DB temp directory.
+        """
+        raw = self.config["paths"]["db_temp"]
+        db_temp = raw.get("remote", "/tmp") if isinstance(raw, dict) else raw
+        base_path = self.config["paths"]["live"]
+
+        if os.path.isabs(db_temp):
+            return db_temp
+        if db_temp.startswith('../'):
+            parent_dir = os.path.dirname(base_path.rstrip('/'))
+            return os.path.join(parent_dir, db_temp[3:])
+        return os.path.join(base_path.rstrip('/'), db_temp)
+        
+    def _list_latest_backup_contents(self):
+        """
+        List the contents of the latest backup directory.
         
         Returns:
             bool: True if successful, False otherwise.
         """
-        trash_dir = self._get_trash_path()
+        backup_dir = self._get_latest_backup_path()
         
         try:
-            # Check if the trash directory is on the remote server
+            # Check if the backup directory is on the remote server
             if self.direction == "push" and not self.dry_run:
                 # Check if directory exists on remote server
-                check_dir_cmd = f"test -d {trash_dir} && echo 'exists' || echo 'not exists'"
+                check_dir_cmd = f"test -d {backup_dir} && echo 'exists' || echo 'not exists'"
                 success, dir_output = self.ssh_manager.execute_remote_command(check_dir_cmd)
                 
                 if not success:
-                    print(f"Failed to check trash directory: {dir_output}")
+                    print(f"Failed to check backup directory: {dir_output}")
                     return False
                 
                 if dir_output.strip() != "exists":
-                    print("Trash directory does not exist on remote server.")
+                    print("Backup directory does not exist on remote server.")
                     return False
                 
                 # List files on remote server
-                cmd = f"find {trash_dir} -type f | sort"
+                cmd = f"find {backup_dir} -type f | sort"
                 success, output = self.ssh_manager.execute_remote_command(cmd)
                 
                 if not success:
-                    print(f"Failed to list trash contents: {output}")
+                    print(f"Failed to list backup contents: {output}")
                     return False
                     
                 if not output.strip():
-                    print("No files found in trash directory.")
+                    print("No files found in backup directory.")
                     return True
                     
-                print("Files in trash directory:")
+                print("Files in backup directory:")
                 for line in output.strip().split('\n'):
                     print(f"  {line}")
             else:
                 # List files on local system
-                if not os.path.exists(trash_dir):
-                    print("Trash directory does not exist.")
+                if not os.path.exists(backup_dir):
+                    print("Backup directory does not exist.")
                     return False
                     
                 files = []
-                for root, _, filenames in os.walk(trash_dir):
+                for root, _, filenames in os.walk(backup_dir):
                     for filename in filenames:
                         files.append(os.path.join(root, filename))
                         
                 if not files:
-                    print("No files found in trash directory.")
+                    print("No files found in backup directory.")
                     return True
                     
-                print("Files in trash directory:")
+                print("Files in backup directory:")
                 for file in sorted(files):
                     print(f"  {file}")
                     
             return True
             
         except Exception as e:
-            print(f"Error listing trash contents: {e}")
+            print(f"Error listing backup contents: {e}")
             return False
             
-    def handle_existing_trash(self):
+    def handle_existing_backup(self):
         """
-        Handle existing trash directory contents before sync.
+        Handle existing latest backup directory contents before sync.
         
         Returns:
             bool: True if successful, False otherwise.
         """
-        if self.args.no_trash:
-            return True  # Skip trash handling if --no-trash flag is used
+        if self.args.no_backup:
+            return True  # Skip backup handling if --no-backup flag is used
             
-        trash_dir = self._get_trash_path()
+        backup_dir = self._get_latest_backup_path()
         
         try:
-            # Check if the trash directory exists and has contents
+            # Check if the backup directory exists and has contents
             if self.direction == "push" and not self.dry_run:
                 # Check on remote server
                 # First ensure the directory exists
-                mkdir_cmd = f"mkdir -p {trash_dir}"
+                mkdir_cmd = f"mkdir -p {backup_dir}"
                 self.ssh_manager.execute_remote_command(mkdir_cmd)
                 
                 # Then check if it has any files
-                check_cmd = f"find {trash_dir} -type f | wc -l || echo 0"
+                check_cmd = f"find {backup_dir} -type f | wc -l || echo 0"
                 success, output = self.ssh_manager.execute_remote_command(check_cmd)
                 
                 if not success:
-                    print(f"Failed to check trash directory: {output}")
+                    print(f"Failed to check backup directory: {output}")
                     return False
                     
                 file_count = int(output.strip())
@@ -185,25 +266,25 @@ class WordPressSync:
                     return True
             else:
                 # Check on local system
-                if not os.path.exists(trash_dir):
-                    os.makedirs(trash_dir, exist_ok=True)
+                if not os.path.exists(backup_dir):
+                    os.makedirs(backup_dir, exist_ok=True)
                     return True
                     
-                # Count files in trash directory
+                # Count files in backup directory
                 file_count = 0
-                for root, _, filenames in os.walk(trash_dir):
+                for root, _, filenames in os.walk(backup_dir):
                     file_count += len(filenames)
                     
                 if file_count == 0:
                     return True
                     
-            # If we get here, the trash directory exists and has files
-            print("\nExisting files found in trash directory:")
-            self._list_trash_contents()
+            # If we get here, the backup directory exists and has files
+            print("\nExisting files found in latest backup directory:")
+            self._list_latest_backup_contents()
             
-            # In non-interactive mode, default to keeping existing trash files (safe default)
+            # In non-interactive mode, default to keeping existing backup files (safe default)
             if self.non_interactive:
-                print("\nNon-interactive mode: keeping existing trash files (archiving).")
+                print("\nNon-interactive mode: archiving existing backup files.")
                 response = "yes"
             else:
                 while True:
@@ -213,77 +294,81 @@ class WordPressSync:
                     print("Please answer 'yes' or 'no'.")
             
             if response in ["yes", "y"]:
-                # Archive existing trash with timestamp
-                timestamp = time.strftime(self.config["backup"].get("archive_format", "wordpress-sync-trash_%Y-%m-%d_%H%M%S"))
-                archive_path = os.path.join(os.path.dirname(trash_dir), timestamp)
+                # Archive existing backup with timestamp
+                archives_dir = self._get_archives_path()
+                timestamp = time.strftime(self.config["backup"].get("archive_format", "wordpress-sync-backup_%Y-%m-%d_%H%M%S"))
+                archive_path = os.path.join(archives_dir, timestamp)
                 
                 if self.direction == "push" and not self.dry_run:
-                    # Archive on remote server - don't recreate trash directory
-                    mv_cmd = f"mv {trash_dir} {archive_path}"
+                    # Archive on remote server - ensure archives dir exists, then move
+                    mkdir_cmd = f"mkdir -p {archives_dir}"
+                    self.ssh_manager.execute_remote_command(mkdir_cmd)
+                    mv_cmd = f"mv {backup_dir} {archive_path}"
                     success, output = self.ssh_manager.execute_remote_command(mv_cmd)
                     
                     if not success:
-                        print(f"Failed to archive trash directory: {output}")
+                        print(f"Failed to archive backup directory: {output}")
                         return False
                 else:
-                    # Archive on local system - don't recreate trash directory
+                    # Archive on local system - ensure archives dir exists, then move
+                    os.makedirs(archives_dir, exist_ok=True)
                     import shutil
-                    shutil.move(trash_dir, archive_path)
+                    shutil.move(backup_dir, archive_path)
                     
-                print(f"Archived existing trash to: {archive_path}")
+                print(f"Archived existing backup to: {archive_path}")
                 return True
             elif response in ["no", "n"]:
-                # Remove existing trash
+                # Remove existing backup
                 if self.direction == "push" and not self.dry_run:
-                    # Remove entire trash directory on remote server
-                    rm_cmd = f"rm -rf {trash_dir} || true"
+                    # Remove entire backup directory on remote server
+                    rm_cmd = f"rm -rf {backup_dir} || true"
                     success, output = self.ssh_manager.execute_remote_command(rm_cmd)
                     
                     if not success:
-                        print(f"Failed to remove trash directory: {output}")
+                        print(f"Failed to remove backup directory: {output}")
                         return False
                         
                     # Recreate the empty directory
-                    mkdir_cmd = f"mkdir -p {trash_dir}"
+                    mkdir_cmd = f"mkdir -p {backup_dir}"
                     self.ssh_manager.execute_remote_command(mkdir_cmd)
                 else:
-                    # Remove entire trash directory on local system
+                    # Remove entire backup directory on local system
                     import shutil
-                    shutil.rmtree(trash_dir, ignore_errors=True)
-                    os.makedirs(trash_dir, exist_ok=True)
+                    shutil.rmtree(backup_dir, ignore_errors=True)
+                    os.makedirs(backup_dir, exist_ok=True)
                             
-                print("Removed existing trash directory")
+                print("Removed existing backup directory")
                 return True
                     
         except Exception as e:
-            print(f"Error handling existing trash: {e}")
+            print(f"Error handling existing backup: {e}")
             return False
             
-    def handle_final_trash_cleanup(self):
+    def handle_final_backup_cleanup(self):
         """
-        Handle final trash cleanup after sync and verification.
+        Handle final backup cleanup after sync and verification.
         
         Returns:
             bool: True if successful, False otherwise.
         """
-        if self.args.no_trash:
-            return True  # Skip trash handling if --no-trash flag is used
+        if self.args.no_backup:
+            return True  # Skip backup handling if --no-backup flag is used
             
-        trash_dir = self._get_trash_path()
+        backup_dir = self._get_latest_backup_path()
         
         try:
-            # Check if the trash directory exists and has contents
+            # Check if the backup directory exists and has contents
             if self.direction == "push" and not self.dry_run:
                 # First ensure the directory exists
-                mkdir_cmd = f"mkdir -p {trash_dir}"
+                mkdir_cmd = f"mkdir -p {backup_dir}"
                 self.ssh_manager.execute_remote_command(mkdir_cmd)
                 
                 # Then check if it has any files
-                check_cmd = f"find {trash_dir} -type f | wc -l || echo 0"
+                check_cmd = f"find {backup_dir} -type f | wc -l || echo 0"
                 success, output = self.ssh_manager.execute_remote_command(check_cmd)
                 
                 if not success:
-                    print(f"Failed to check trash directory: {output}")
+                    print(f"Failed to check backup directory: {output}")
                     return False
                     
                 file_count = int(output.strip())
@@ -292,22 +377,22 @@ class WordPressSync:
                     return True
             else:
                 # Check on local system
-                if not os.path.exists(trash_dir):
+                if not os.path.exists(backup_dir):
                     print("No files were backed up during sync.")
                     return True
                     
-                # Count files in trash directory
+                # Count files in backup directory
                 file_count = 0
-                for root, _, filenames in os.walk(trash_dir):
+                for root, _, filenames in os.walk(backup_dir):
                     file_count += len(filenames)
                     
                 if file_count == 0:
                     print("No files were backed up during sync.")
                     return True
                     
-            # If we get here, the trash directory exists and has files
+            # If we get here, the backup directory exists and has files
             print("\nThe following files were backed up during sync:")
-            self._list_trash_contents()
+            self._list_latest_backup_contents()
             
             # In non-interactive mode, default to keeping backups (safe default)
             if self.non_interactive:
@@ -322,43 +407,47 @@ class WordPressSync:
             
             if response in ["yes", "y"]:
                 if self.direction == "push" and not self.dry_run:
-                    # Remove on remote server - remove entire trash directory
-                    rm_cmd = f"rm -rf {trash_dir} || true"
+                    # Remove on remote server - remove entire backup directory
+                    rm_cmd = f"rm -rf {backup_dir} || true"
                     success, output = self.ssh_manager.execute_remote_command(rm_cmd)
                     
                     if not success:
-                        print(f"Failed to remove trash directory: {output}")
+                        print(f"Failed to remove backup directory: {output}")
                         return False
                 else:
-                    # Remove on local system - remove entire trash directory
+                    # Remove on local system - remove entire backup directory
                     import shutil
-                    shutil.rmtree(trash_dir, ignore_errors=True)
+                    shutil.rmtree(backup_dir, ignore_errors=True)
                             
                 print("Backed up files have been deleted")
                 return True
             elif response in ["no", "n"]:
-                # Archive the trash directory with timestamp
-                timestamp = time.strftime(self.config["backup"].get("archive_format", "wordpress-sync-trash_%Y-%m-%d_%H%M%S"))
-                archive_path = os.path.join(os.path.dirname(trash_dir), timestamp)
+                # Archive the backup directory with timestamp
+                archives_dir = self._get_archives_path()
+                timestamp = time.strftime(self.config["backup"].get("archive_format", "wordpress-sync-backup_%Y-%m-%d_%H%M%S"))
+                archive_path = os.path.join(archives_dir, timestamp)
                 
                 if self.direction == "push" and not self.dry_run:
-                    # Archive on remote server - don't recreate trash directory
-                    mv_cmd = f"mv {trash_dir} {archive_path}"
+                    # Archive on remote server - ensure archives dir exists, then move
+                    mkdir_cmd = f"mkdir -p {archives_dir}"
+                    self.ssh_manager.execute_remote_command(mkdir_cmd)
+                    mv_cmd = f"mv {backup_dir} {archive_path}"
                     success, output = self.ssh_manager.execute_remote_command(mv_cmd)
                     
                     if not success:
-                        print(f"Failed to archive trash directory: {output}")
+                        print(f"Failed to archive backup directory: {output}")
                         return False
                 else:
-                    # Archive on local system - don't recreate trash directory
+                    # Archive on local system - ensure archives dir exists, then move
+                    os.makedirs(archives_dir, exist_ok=True)
                     import shutil
-                    shutil.move(trash_dir, archive_path)
+                    shutil.move(backup_dir, archive_path)
                     
                 print(f"Backed up files have been archived to: {archive_path}")
                 return True
                     
         except Exception as e:
-            print(f"Error handling final trash cleanup: {e}")
+            print(f"Error handling final backup cleanup: {e}")
             return False
 
     def parse_arguments(self):
@@ -416,9 +505,18 @@ class WordPressSync:
         )
         
         parser.add_argument(
-            "--no-trash",
+            "--no-backup",
+            "--no-trash",  # backward-compatible alias
             action="store_true",
-            help="Skip backup of deleted/modified files to trash directory"
+            dest="no_backup",
+            help="Skip backup of deleted/modified files during sync"
+        )
+        
+        parser.add_argument(
+            "--skip-final-cleanup",
+            action="store_true",
+            help="Skip the post-sync backup cleanup step (step 11). "
+                 "Useful when the GUI handles cleanup interactively."
         )
         
         # Add mutually exclusive group for synchronization type
@@ -484,9 +582,9 @@ class WordPressSync:
                 if self.config["rsync"]["dry_run"] is False:
                     self.dry_run = False
                     
-            # Command line argument (--no-trash) takes precedence over config
-            if self.args.no_trash:
-                self.config["no_trash"] = True
+            # Command line argument (--no-backup) takes precedence over config
+            if self.args.no_backup:
+                self.config["no_backup"] = True
             
             # Store runtime-only flags for rsync (underscore prefix = not from YAML)
             self.config["_extra_rsync_args"] = self.args.extra_rsync_args
@@ -619,7 +717,7 @@ class WordPressSync:
                 self.command_collector.set_section("Directory Setup")
                 
                 # Ensure local temp directory exists
-                local_temp_dir = self.config["paths"]["db_temp"]
+                local_temp_dir = self._resolve_local_db_temp()
                 mkdir_local_cmd = f'mkdir -p {local_temp_dir}'
                 self.command_collector.add_command(
                     mkdir_local_cmd,
@@ -630,22 +728,7 @@ class WordPressSync:
                 
                 # Ensure remote temp directory exists if needed
                 if self.direction == "push" or self.direction == "pull":
-                    # Get the correct remote temp directory path
-                    db_temp = self.config["paths"]["db_temp"]
-                    remote_db_temp = ""
-                    
-                    # If db_temp is an absolute path, use it directly
-                    if os.path.isabs(db_temp):
-                        remote_db_temp = db_temp
-                    # If db_temp starts with ../ or ./, it's relative to the live path's parent directory
-                    elif db_temp.startswith(('../', './')):
-                        # Get the parent directory of live_path
-                        live_parent = os.path.dirname(self.config["paths"]["live"].rstrip('/'))
-                        # Normalize the path to resolve any .. or . components
-                        remote_db_temp = os.path.normpath(os.path.join(live_parent, db_temp))
-                    # Otherwise, treat it as relative to the live path itself
-                    else:
-                        remote_db_temp = os.path.join(self.config["paths"]["live"], db_temp)
+                    remote_db_temp = self._resolve_remote_db_temp()
                     
                     mkdir_remote_cmd = f'mkdir -p {remote_db_temp}'
                     self.command_collector.add_command(
@@ -726,7 +809,9 @@ class WordPressSync:
                     
                     if self.direction == "push":
                         # Export from local
-                        db_file = os.path.join(self.config["paths"]["db_temp"], self.config["paths"].get("db_filename", "wordpress-sync-database.sql"))
+                        local_db_temp = self._resolve_local_db_temp()
+                        db_filename = self.config["paths"].get("db_filename", "wordpress-sync-database.sql")
+                        db_file = os.path.join(local_db_temp, db_filename)
                         export_cmd = f'wp --path="{self.config["paths"]["local"]}" db export {db_file} --allow-root'
                         self.command_collector.add_command(
                             export_cmd,
@@ -736,26 +821,8 @@ class WordPressSync:
                         )
                         
                         # Transfer database file to remote
-                        # Get the correct remote temp directory path
-                        db_temp = self.config["paths"]["db_temp"]
-                        remote_db_temp = ""
-                        
-                        # If db_temp is an absolute path, use it directly
-                        if os.path.isabs(db_temp):
-                            remote_db_temp = db_temp
-                        # If db_temp starts with ../
-                        elif db_temp.startswith('../'):
-                            # Get the parent directory of the WordPress directory
-                            live_parent = os.path.dirname(self.config["paths"]["live"].rstrip('/'))
-                            # Remove the ../ prefix from db_temp
-                            relative_path = db_temp[3:]
-                            # Join the parent directory with the remaining path
-                            remote_db_temp = os.path.join(live_parent, relative_path)
-                        # Otherwise, treat it as relative to the live path itself
-                        else:
-                            remote_db_temp = os.path.join(self.config["paths"]["live"], db_temp)
-                            
-                        remote_db_file = os.path.join(remote_db_temp, self.config["paths"].get("db_filename", "wordpress-sync-database.sql"))
+                        remote_db_temp = self._resolve_remote_db_temp()
+                        remote_db_file = os.path.join(remote_db_temp, db_filename)
                         scp_cmd = f'scp -i {self.config["ssh"]["key_path"]} {db_file} {self.config["ssh"]["user"]}@{self.config["ssh"]["host"]}:{remote_db_file}'
                         self.command_collector.add_command(
                             scp_cmd,
@@ -766,23 +833,20 @@ class WordPressSync:
                         
                         # Database backup commands (if enabled)
                         if backup_enabled:
-                            # Get backup paths
-                            backup_dir = self.config["backup"]["database"].get("directory", "../wordpress-sync-db-backups")
-                            filename_format = self.config["backup"]["database"].get("filename_format", "db-backup_%Y-%m-%d_%H%M%S.sql")
-                            
-                            # Resolve the full backup directory path
-                            if os.path.isabs(backup_dir):
-                                full_backup_dir = backup_dir
-                            elif backup_dir.startswith('../'):
-                                # Get the parent directory of the WordPress directory
-                                live_parent = os.path.dirname(self.config["paths"]["live"].rstrip('/'))
-                                # Remove the ../ prefix from backup_dir
-                                relative_path = backup_dir[3:]
-                                # Join the parent directory with the remaining path
-                                full_backup_dir = os.path.join(live_parent, relative_path)
+                            # Resolve DB backup directory: new format uses <root>/db/, old uses separate directory
+                            if self._is_new_backup_format():
+                                full_backup_dir = os.path.join(self._resolve_backup_root(), "db")
                             else:
-                                # For other relative paths, join with live_path
-                                full_backup_dir = os.path.join(self.config["paths"]["live"], backup_dir)
+                                backup_dir = self.config["backup"]["database"].get("directory", "../wordpress-sync-db-backups")
+                                if os.path.isabs(backup_dir):
+                                    full_backup_dir = backup_dir
+                                elif backup_dir.startswith('../'):
+                                    live_parent = os.path.dirname(self.config["paths"]["live"].rstrip('/'))
+                                    full_backup_dir = os.path.join(live_parent, backup_dir[3:])
+                                else:
+                                    full_backup_dir = os.path.join(self.config["paths"]["live"], backup_dir)
+                            
+                            filename_format = self.config["backup"]["database"].get("filename_format", "db-backup_%Y-%m-%d_%H%M%S.sql")
                                 
                             # Create backup directory
                             mkdir_cmd = f"mkdir -p {full_backup_dir}"
@@ -824,26 +888,9 @@ class WordPressSync:
                         )
                     else:  # pull
                         # Export from remote
-                        # Get the correct remote temp directory path
-                        db_temp = self.config["paths"]["db_temp"]
-                        remote_db_temp = ""
-                        
-                        # If db_temp is an absolute path, use it directly
-                        if os.path.isabs(db_temp):
-                            remote_db_temp = db_temp
-                        # If db_temp starts with ../
-                        elif db_temp.startswith('../'):
-                            # Get the parent directory of the WordPress directory
-                            live_parent = os.path.dirname(self.config["paths"]["live"].rstrip('/'))
-                            # Remove the ../ prefix from db_temp
-                            relative_path = db_temp[3:]
-                            # Join the parent directory with the remaining path
-                            remote_db_temp = os.path.join(live_parent, relative_path)
-                        # Otherwise, treat it as relative to the live path itself
-                        else:
-                            remote_db_temp = os.path.join(self.config["paths"]["live"], db_temp)
-                            
-                        remote_db_file = os.path.join(remote_db_temp, self.config["paths"].get("db_filename", "wordpress-sync-database.sql"))
+                        remote_db_temp = self._resolve_remote_db_temp()
+                        db_filename = self.config["paths"].get("db_filename", "wordpress-sync-database.sql")
+                        remote_db_file = os.path.join(remote_db_temp, db_filename)
                         export_cmd = f'wp --path="{self.config["paths"]["live"]}" db export {remote_db_file} --allow-root'
                         self.command_collector.add_command(
                             export_cmd,
@@ -853,7 +900,8 @@ class WordPressSync:
                         )
                         
                         # Transfer database file to local
-                        db_file = os.path.join(self.config["paths"]["db_temp"], self.config["paths"].get("db_filename", "wordpress-sync-database.sql"))
+                        local_db_temp = self._resolve_local_db_temp()
+                        db_file = os.path.join(local_db_temp, db_filename)
                         scp_cmd = f'scp -i {self.config["ssh"]["key_path"]} {self.config["ssh"]["user"]}@{self.config["ssh"]["host"]}:{remote_db_file} {db_file}'
                         self.command_collector.add_command(
                             scp_cmd,
@@ -864,23 +912,20 @@ class WordPressSync:
                         
                         # Database backup commands (if enabled)
                         if backup_enabled:
-                            # Get backup paths
-                            backup_dir = self.config["backup"]["database"].get("directory", "../wordpress-sync-db-backups")
-                            filename_format = self.config["backup"]["database"].get("filename_format", "db-backup_%Y-%m-%d_%H%M%S.sql")
-                            
-                            # Resolve the full backup directory path
-                            if os.path.isabs(backup_dir):
-                                full_backup_dir = backup_dir
-                            elif backup_dir.startswith('../'):
-                                # Get the parent directory of the WordPress directory
-                                local_parent = os.path.dirname(self.config["paths"]["local"].rstrip('/'))
-                                # Remove the ../ prefix from backup_dir
-                                relative_path = backup_dir[3:]
-                                # Join the parent directory with the remaining path
-                                full_backup_dir = os.path.join(local_parent, relative_path)
+                            # Resolve DB backup directory: new format uses <root>/db/, old uses separate directory
+                            if self._is_new_backup_format():
+                                full_backup_dir = os.path.join(self._resolve_backup_root(), "db")
                             else:
-                                # For other relative paths, join with local_path
-                                full_backup_dir = os.path.join(self.config["paths"]["local"], backup_dir)
+                                backup_dir = self.config["backup"]["database"].get("directory", "../wordpress-sync-db-backups")
+                                if os.path.isabs(backup_dir):
+                                    full_backup_dir = backup_dir
+                                elif backup_dir.startswith('../'):
+                                    local_parent = os.path.dirname(self.config["paths"]["local"].rstrip('/'))
+                                    full_backup_dir = os.path.join(local_parent, backup_dir[3:])
+                                else:
+                                    full_backup_dir = os.path.join(self.config["paths"]["local"], backup_dir)
+                            
+                            filename_format = self.config["backup"]["database"].get("filename_format", "db-backup_%Y-%m-%d_%H%M%S.sql")
                                 
                             # Create backup directory
                             mkdir_cmd = f"mkdir -p {full_backup_dir}"
@@ -1219,43 +1264,43 @@ class WordPressSync:
                     "both"
                 )
                 
-                # Trash operations
-                if not self.args.no_trash:
-                    self.command_collector.set_section("Trash Management")
+                # Backup management operations
+                if not self.args.no_backup:
+                    self.command_collector.set_section("Backup Management")
                     
-                    # Get the trash directory path
-                    trash_dir = self._get_trash_path()
+                    # Get the latest backup directory path
+                    backup_dir = self._get_latest_backup_path()
                     
-                    # Check for existing trash before sync
+                    # Check for existing backup before sync
                     if self.direction == "push":
-                        check_cmd = f"test -d {trash_dir} && find {trash_dir} -type f | wc -l || echo 0"
+                        check_cmd = f"test -d {backup_dir} && find {backup_dir} -type f | wc -l || echo 0"
                         self.command_collector.add_command(
                             check_cmd,
-                            f"Check for existing files in trash directory: {trash_dir}",
+                            f"Check for existing files in backup directory: {backup_dir}",
                             "remote",
                             f"{self.config['ssh']['user']}"
                         )
                         
-                        mkdir_cmd = f"mkdir -p {trash_dir}"
+                        mkdir_cmd = f"mkdir -p {backup_dir}"
                         self.command_collector.add_command(
                             mkdir_cmd,
-                            f"Ensure trash directory exists: {trash_dir}",
+                            f"Ensure backup directory exists: {backup_dir}",
                             "remote",
                             f"{self.config['ssh']['user']}"
                         )
                     else:
-                        check_cmd = f"test -d {trash_dir} && find {trash_dir} -type f | wc -l || echo 0"
+                        check_cmd = f"test -d {backup_dir} && find {backup_dir} -type f | wc -l || echo 0"
                         self.command_collector.add_command(
                             check_cmd,
-                            f"Check for existing files in trash directory: {trash_dir}",
+                            f"Check for existing files in backup directory: {backup_dir}",
                             "local",
                             "Local User"
                         )
                         
-                        mkdir_cmd = f"mkdir -p {trash_dir}"
+                        mkdir_cmd = f"mkdir -p {backup_dir}"
                         self.command_collector.add_command(
                             mkdir_cmd,
-                            f"Ensure trash directory exists: {trash_dir}",
+                            f"Ensure backup directory exists: {backup_dir}",
                             "local",
                             "Local User"
                         )
@@ -1263,13 +1308,13 @@ class WordPressSync:
                     # Note about backup during rsync
                     self.command_collector.add_command(
                         "",
-                        f"Files that would be deleted or modified will be backed up to: {trash_dir}",
+                        f"Files that would be deleted or modified will be backed up to: {backup_dir}",
                         "both"
                     )
                     
-                    # Final trash cleanup
+                    # Final backup cleanup
                     if self.direction == "push":
-                        list_cmd = f"find {trash_dir} -type f | sort"
+                        list_cmd = f"find {backup_dir} -type f | sort"
                         self.command_collector.add_command(
                             list_cmd,
                             "List backed up files after sync",
@@ -1277,16 +1322,16 @@ class WordPressSync:
                             f"{self.config['ssh']['user']}"
                         )
                         
-                        # Add command to remove entire trash directory
-                        rm_cmd = f"rm -rf {trash_dir}"
+                        # Add command to remove entire backup directory
+                        rm_cmd = f"rm -rf {backup_dir}"
                         self.command_collector.add_command(
                             rm_cmd,
-                            "Remove trash directory when user chooses to delete backed up files",
+                            "Remove backup directory when user chooses to delete backed up files",
                             "remote",
                             f"{self.config['ssh']['user']}"
                         )
                     else:
-                        list_cmd = f"find {trash_dir} -type f | sort"
+                        list_cmd = f"find {backup_dir} -type f | sort"
                         self.command_collector.add_command(
                             list_cmd,
                             "List backed up files after sync",
@@ -1294,11 +1339,11 @@ class WordPressSync:
                             "Local User"
                         )
                         
-                        # Add command to remove entire trash directory
-                        rm_cmd = f"rm -rf {trash_dir}"
+                        # Add command to remove entire backup directory
+                        rm_cmd = f"rm -rf {backup_dir}"
                         self.command_collector.add_command(
                             rm_cmd,
-                            "Remove trash directory when user chooses to delete backed up files",
+                            "Remove backup directory when user chooses to delete backed up files",
                             "local",
                             "Local User"
                         )
@@ -1312,16 +1357,16 @@ class WordPressSync:
             
             print(f"\nStarting {'dry run of ' if self.dry_run else ''}{sync_type} WordPress synchronization: {source_env} → {target_env}")
             
-            # Check for existing trash before sync (if not --no-trash)
-            if self.args.no_trash:
-                print("\nSkipping trash operations (--no-trash flag used)")
+            # Check for existing backup before sync (if not --no-backup)
+            if self.args.no_backup:
+                print("\nSkipping backup operations (--no-backup flag used)")
             elif self.dry_run:
-                trash_dir = self._get_trash_path()
-                print(f"\nDuring actual sync, existing files in trash directory will be checked: {trash_dir}")
-                print("You will be prompted to keep or remove existing trash before sync")
+                backup_dir = self._get_latest_backup_path()
+                print(f"\nDuring actual sync, existing files in backup directory will be checked: {backup_dir}")
+                print("You will be prompted to keep or remove existing backups before sync")
             else:
-                print("\nChecking for existing trash...")
-                if not self.handle_existing_trash():
+                print("\nChecking for existing backups...")
+                if not self.handle_existing_backup():
                     return False
             
             # Step 1: Enable maintenance mode (always do this for safety)
@@ -1398,16 +1443,20 @@ class WordPressSync:
             else:
                 print(f"  {self.config['domains']['staging']['https']}")
             
-            # Step 11: Review backed up files (if not --no-trash)
-            if self.args.no_trash:
-                print("\nStep 11: Skipping trash operations (--no-trash flag used)")
+            # Step 11: Review backed up files (if not --no-backup)
+            if self.args.no_backup:
+                print("\nStep 11: Skipping backup review (--no-backup flag used)")
+            elif self.args.skip_final_cleanup:
+                backup_dir = self._get_latest_backup_path()
+                print(f"\nStep 11: Skipping backup cleanup (--skip-final-cleanup flag used)")
+                print(f"         Backed up files are available at: {backup_dir}")
             elif self.dry_run:
-                trash_dir = self._get_trash_path()
-                print(f"\nStep 11: During actual sync, files will be backed up to: {trash_dir}")
+                backup_dir = self._get_latest_backup_path()
+                print(f"\nStep 11: During actual sync, files will be backed up to: {backup_dir}")
                 print("         You will be prompted to review backed up files after verifying the site")
             else:
                 print("\nStep 11: Reviewing backed up files...")
-                if not self.handle_final_trash_cleanup():
+                if not self.handle_final_backup_cleanup():
                     return False
             
             # Step 12: Clean up

@@ -88,6 +88,61 @@ Same workflow, but select **Push** direction. The GUI shows an amber safety warn
 
 ---
 
+## What's New in v2.1.0
+
+This release restructures how backups are organized, renames "trash" to "backup" throughout the project, and adds split local/remote path configuration. All changes are **backward-compatible** -- old config formats, CLI flags, and on-disk directory layouts are still recognized.
+
+### Unified Backup Directory
+
+Backups are now organized under a single root directory with three subdirectories:
+
+```
+wordpress-sync-backups/          # Backup root (configurable per-side)
+  latest/                        # rsync's --backup-dir target (current sync's backed-up files)
+  archives/                      # Timestamped snapshots from previous syncs
+  db/                            # Database SQL dumps
+```
+
+Previously, file backups, archives, and database backups each had separate directory configs. Now they all live under one root. The old `backup.database.directory` config key is deprecated (but still read for backward compatibility).
+
+### Split Local/Remote Paths
+
+`backup.directory` and `paths.db_temp` now accept separate local and remote paths:
+
+```yaml
+backup:
+  directory:
+    local: "../wordpress-sync-backups"
+    remote: "../wordpress-sync-backups"
+
+paths:
+  db_temp:
+    local: "../wordpress-sync-tmp-db/"
+    remote: "../wordpress-sync-tmp-db/"
+```
+
+The old single-string format is still supported and is automatically normalized by the GUI on load.
+
+### "Trash" Renamed to "Backup"
+
+All user-facing labels, CLI flags, config keys, and function names that referenced "trash" have been renamed to "backup":
+- CLI: `--no-backup` replaces `--no-trash` (old flag still accepted as alias)
+- GUI: "Current Trash" -> "Latest Backup", "Trash Archive" -> "Backup Archive", "No Trash" -> "Skip File Backup", "Backup & Trash" -> "Backups"
+- Config: `no_backup` replaces `no_trash` (old key still recognized)
+
+### New CLI Flag: `--skip-final-cleanup`
+
+Skips step 11 (post-sync backup cleanup) so the GUI can handle it interactively instead of the CLI silently archiving in non-interactive mode.
+
+### GUI Improvements
+
+- **Browse buttons** for local backup directory, DB temp directory, and WordPress path (native macOS directory picker)
+- **Resolved path preview** in the Backup config section showing the full `latest/`, `archives/`, `db/` tree
+- **"Show in Finder" button** in Backup Manager for local items
+- **Auto-migration** of old config formats to the new `{ local, remote }` dict format on load
+
+---
+
 ## What's New in v2.0.0
 
 This release restructures the project as a **monorepo** (`cli/` + `gui/`) and adds a full-featured desktop GUI. The CLI remains fully standalone and backward-compatible.
@@ -129,7 +184,7 @@ All CLI changes are **additive** -- existing behavior is preserved. New flags ha
 When `--non-interactive` is active, the CLI applies multiple layers of protection against hanging:
 
 1. **Direct prompt guards** -- All 4 `input()` calls and 1 `getpass()` call in the codebase are guarded with `if self.non_interactive` checks that return safe defaults:
-   - "Keep existing trash files?" -> Yes (archive, preserve data)
+   - "Keep existing backup files?" -> Yes (archive, preserve data)
    - "Delete backed-up files?" -> No (archive, preserve data)
    - "Backup database before reset?" -> Yes (always backup)
    - "Proceed with synchronization?" -> Exit (let the caller decide)
@@ -163,7 +218,7 @@ The GUI is a native macOS desktop application built with **Tauri v2** (Rust) and
 ### CLI Features
 - Bi-directional sync (push to live or pull from live)
 - Automated validation of WordPress core files and database
-- File sync via `rsync` with backup/trash management
+- File sync via `rsync` with automatic backup management
 - Database export/import with URL rewriting via WP-CLI
 - Automatic maintenance mode during sync
 - File permission and ownership management
@@ -178,10 +233,10 @@ The GUI is a native macOS desktop application built with **Tauri v2** (Rust) and
 - **Sync execution with real-time streaming** -- 5-phase workflow: Options -> Dry Run -> Diff Viewer -> Syncing -> Complete. Output streams in real time with batched rendering (250ms throttle, max 4 updates/sec) to prevent UI freeze.
 - **Dry run diff viewer** -- Transforms rsync's itemize-changes output into a collapsible directory tree with tri-state checkboxes for selective file exclusion, filtering by change type (added/modified/deleted), size filtering, and search.
 - **12-step sync tracker** -- Visual stepper showing progress through all 12 CLI sync steps with automatic detection of skipped steps.
-- **Backup Manager** -- Browse, download, restore, and delete backup artifacts (trash archives, current trash, database backups) from both local and remote. Supports bulk operations with multi-select.
-- **File restore** -- Rsync a trash archive back to the WordPress directory, putting every file back in its original location.
+- **Backup Manager** -- Browse, download, restore, and delete backup artifacts (backup archives, latest backup, database backups) from both local and remote. Supports bulk operations with multi-select.
+- **File restore** -- Rsync a backup archive back to the WordPress directory, putting every file back in its original location.
 - **Database restore** -- Import a SQL backup via `wp db import`. Always takes a safety backup of the current database first.
-- **Post-sync trash cleanup** -- After a successful sync, optionally prompts to delete or archive backed-up files (controlled by `backup.cleanup_prompt` config).
+- **Post-sync backup cleanup** -- After a successful sync, optionally prompts to delete or archive backed-up files (controlled by `backup.cleanup_prompt` config).
 - **Sync history** -- Persisted to `~/.wordpress-sync/history/` as JSON files. Filterable table with log viewer, re-run, and delete.
 - **Health checks** -- Diagnostic checks for SSH connectivity, WordPress installation, database, and tools.
 - **Command preview** -- Shows all shell commands the CLI would execute, organized by section.
@@ -270,7 +325,9 @@ operation:
 paths:
   local: /Users/me/Sites/wordpress/
   live: /var/www/html/wordpress/
-  db_temp: /tmp/
+  db_temp:                              # Staging area for DB export/import
+    local: "../wordpress-sync-tmp-db/"  # Relative paths resolve against each site's root
+    remote: "../wordpress-sync-tmp-db/"
   db_filename: wordpress-sync-database.sql
 
 domains:
@@ -300,12 +357,13 @@ ownership:
 
 backup:
   enabled: true
-  directory: "../wordpress-sync-trash"
-  archive_format: "wordpress-sync-trash_%Y-%m-%d_%H%M%S"
+  directory:
+    local: "../wordpress-sync-backups"
+    remote: "../wordpress-sync-backups"
+  archive_format: "wordpress-sync-backup_%Y-%m-%d_%H%M%S"
   cleanup_prompt: true
   database:
     enabled: true
-    directory: "../wordpress-sync-db-backups"
     filename_format: "db-backup_%Y-%m-%d_%H%M%S.sql"
 
 validation:
@@ -376,8 +434,11 @@ wordpress-sync --direction pull --config config.yaml --non-interactive --itemize
 wordpress-sync --direction pull --config config.yaml --skip-validation
 wordpress-sync --direction pull --config config.yaml --skip-wp-check
 
-# Disable file backup to trash
-wordpress-sync --direction push --config config.yaml --no-trash
+# Disable file backup during sync
+wordpress-sync --direction push --config config.yaml --no-backup
+
+# Skip post-sync backup cleanup (let the caller handle it)
+wordpress-sync --direction push --config config.yaml --non-interactive --skip-final-cleanup
 
 # Pass extra args to rsync
 wordpress-sync --direction push --config config.yaml --extra-rsync-args "--bwlimit=1000"
@@ -391,14 +452,14 @@ wordpress-sync --direction push --config config.yaml --sudo-password "password"
 1. Activate maintenance mode on both environments
 2. Run a dry-run preview of file changes (default)
 3. Prompt for user confirmation
-4. Transfer files via rsync (with `--backup-dir` for trash)
+4. Transfer files via rsync (with `--backup-dir` for backup)
 5. Export/import database and rewrite URLs
 6. Set file permissions and ownership
 7. Run validation checks
 8. Flush caches
 9. Disable maintenance mode
 10. Clean up temporary files
-11. Handle trash (archive or delete backed-up files)
+11. Handle backups (archive or delete backed-up files)
 
 ---
 
@@ -406,7 +467,7 @@ wordpress-sync --direction push --config config.yaml --sudo-password "password"
 
 ### How Backups Work
 
-**File backups:** During rsync, the `--backup` and `--backup-dir` flags cause any overwritten or deleted files to be moved to the trash directory. The directory structure is preserved -- e.g., if `wp-content/themes/style.css` is overwritten, it appears at `<trash>/wp-content/themes/style.css`.
+**File backups:** During rsync, the `--backup` and `--backup-dir` flags cause any overwritten or deleted files to be moved to the `latest/` backup directory. The directory structure is preserved -- e.g., if `wp-content/themes/style.css` is overwritten, it appears at `<backup_dir>/latest/wp-content/themes/style.css`.
 
 **Database backups:** Before a database reset/import, a `wp db export` creates a timestamped SQL dump in the DB backup directory.
 
@@ -418,34 +479,35 @@ wordpress-sync --direction push --config config.yaml --sudo-password "password"
 
 The Backup Manager in the GUI provides restore functionality:
 
-**File restore:** Select a trash archive and click the restore button. The GUI rsyncs the archive's contents back to the WordPress directory, putting every file back in its original location. Works for both local and remote backups.
+**File restore:** Select a backup archive and click the restore button. The GUI rsyncs the archive's contents back to the WordPress directory, putting every file back in its original location. Works for both local and remote backups.
 
 **Database restore:** Select a `.sql` backup and click restore. The GUI:
 1. Takes a safety backup of the current database (so you can undo the undo)
 2. Imports the selected backup via `wp db import`
 3. Shows the safety backup path in case you need to roll back
 
-### Trash Cleanup
+### Backup Cleanup
 
 After a sync, if `backup.cleanup_prompt` is enabled in the site config, the GUI prompts:
-- **Delete** -- Removes the trash directory (local items go to macOS Trash and are restorable via Finder; remote items are permanently deleted)
-- **Keep (Archive)** -- Renames the trash directory with a timestamp using the `archive_format` pattern
+- **Delete** -- Removes the latest backup directory (local items go to macOS Trash and are restorable via Finder; remote items are permanently deleted)
+- **Keep (Archive)** -- Renames the latest backup directory with a timestamp using the `archive_format` pattern
 
 ### Configuration
 
 ```yaml
 backup:
   enabled: true                                    # Enable file backup during rsync
-  directory: "../wordpress-sync-trash"             # Trash directory (relative to site root)
-  archive_format: "wordpress-sync-trash_%Y-%m-%d_%H%M%S"  # Timestamp format for archives
+  directory:                                       # Backup directory (relative to site root)
+    local: "../wordpress-sync-backups"
+    remote: "../wordpress-sync-backups"
+  archive_format: "wordpress-sync-backup_%Y-%m-%d_%H%M%S"  # Timestamp format for archives
   cleanup_prompt: true                             # Prompt to clean up after sync (GUI only)
   database:
     enabled: true                                  # Enable DB backup before import
-    directory: "../wordpress-sync-db-backups"       # DB backup directory
     filename_format: "db-backup_%Y-%m-%d_%H%M%S.sql"
 ```
 
-Use `--no-trash` on the CLI (or the "No Trash" checkbox in the GUI) to disable file backups.
+Use `--no-backup` on the CLI (or the "Skip File Backup" checkbox in the GUI) to disable file backups. The `--no-trash` flag is still accepted as an alias for backward compatibility.
 
 ---
 
@@ -517,7 +579,7 @@ gui/                          # Tauri desktop application
 - **macOS PATH issue:** Tauri processes inherit a minimal PATH (`/usr/bin:/bin`). A `PATH_SETUP` constant is prepended to every shell command, adding Homebrew, pip, and pipx paths. It also recovers `SSH_AUTH_SOCK` via `launchctl getenv` and sets `PYTHONUNBUFFERED=1`.
 - **Output batching:** CLI output is buffered for 250ms before flushing to the Svelte store, limiting UI updates to 4/sec during rapid output.
 - **Platform-aware commands:** Local backup listing uses macOS BSD tools (`stat -f`); remote uses Linux GNU tools (`find -printf`). SSH commands use heredocs (`<<'REMOTECMD'`) to avoid quoting issues.
-- **Local delete uses macOS Trash:** When deleting local backup items, the GUI moves them to Finder Trash via `osascript` so they're restorable. Remote items are permanently deleted with a warning dialog.
+- **Local delete uses macOS Trash:** When deleting local backup items, the GUI moves them to macOS Finder Trash via `osascript` so they're restorable. Remote items are permanently deleted with a warning dialog.
 
 ---
 

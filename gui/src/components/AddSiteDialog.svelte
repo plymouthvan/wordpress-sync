@@ -53,7 +53,7 @@
       const defaultConfig = {
         name: slug,
         ssh: { user: '', host: '', port: 22, key_path: '', sudo: { user: '', key_path: '' } },
-        paths: { local: '', live: '', db_temp: '/tmp', db_filename: 'database.sql' },
+        paths: { local: '', live: '', db_temp: { local: '/tmp', remote: '/tmp' }, db_filename: 'database.sql' },
         domains: {
           staging: { http: '', https: '' },
           live: { http: '', https: '' }
@@ -72,12 +72,11 @@
         ownership: { user: 'www-data', group: 'www-data' },
         backup: {
           enabled: true,
-          directory: 'backups/',
-          archive_format: 'wordpress-sync-trash_%Y-%m-%d_%H%M%S',
+          directory: { local: '../wordpress-sync-backups', remote: '../wordpress-sync-backups' },
+          archive_format: 'wordpress-sync-backup_%Y-%m-%d_%H%M%S',
           cleanup_prompt: true,
           database: {
             enabled: true,
-            directory: 'db-backups/',
             filename_format: 'db-%Y%m%d-%H%M%S.sql'
           }
         },

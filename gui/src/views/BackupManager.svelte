@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { selectedSite } from '$lib/stores/sites';
-  import { loadSiteConfig } from '$lib/services/config';
+  import { loadSiteConfig, normalizeBackupConfig } from '$lib/services/config';
   import {
     listAllBackups,
     computeSummary,
@@ -10,14 +10,18 @@
     browseBackupContents,
     restoreFileBackup,
     restoreDbBackup,
-    getTrashDir,
+    getLatestDir,
     getDbBackupDir,
+    getBackupRootDir,
+    getArchivesDir,
+    resolveDbBackupDir,
     type BackupItem,
     type BackupSummary,
-    type TrashFileEntry,
+    type BackupFileEntry,
   } from '$lib/services/backup';
   import { createBackupCommand, type BackupOptions } from '$lib/services/cli';
   import { termInfo, termError, termSuccess, terminalOpen } from '$lib/stores/terminal';
+  import { revealItemInDir } from '@tauri-apps/plugin-opener';
   import type { SiteConfig } from '$lib/types';
 
   interface Props {
@@ -35,7 +39,7 @@
   let items = $state<BackupItem[]>([]);
 
   // Filters
-  let filterCategory = $state<'all' | 'trash-archive' | 'db-backup'>('all');
+  let filterCategory = $state<'all' | 'backup-archive' | 'db-backup'>('all');
   let filterLocation = $state<'all' | 'local' | 'remote'>('all');
 
   // Filtered items
@@ -49,7 +53,7 @@
   // Summaries
   let totalSummary = $derived(computeSummary(items));
   let filteredSummary = $derived(computeSummary(filteredItems));
-  let trashSummary = $derived(computeSummary(items.filter(i => i.category === 'trash-current' || i.category === 'trash-archive')));
+  let backupFileSummary = $derived(computeSummary(items.filter(i => i.category === 'backup-latest' || i.category === 'backup-archive')));
   let dbSummary = $derived(computeSummary(items.filter(i => i.category === 'db-backup')));
 
   // Action state
@@ -58,7 +62,7 @@
 
   // Browse state
   let browsingItem = $state<BackupItem | null>(null);
-  let browseContents = $state<TrashFileEntry[]>([]);
+  let browseContents = $state<BackupFileEntry[]>([]);
   let browseLoading = $state(false);
 
   // Manual backup state
@@ -79,8 +83,12 @@
   let bulkProgressMessage = $state('');
 
   // Path display
-  let trashDirLocal = $derived(config ? getTrashDir(config, 'local') : '');
-  let trashDirRemote = $derived(config ? getTrashDir(config, 'remote') : '');
+  let backupRootLocal = $derived(config ? getBackupRootDir(config, 'local') : '');
+  let backupRootRemote = $derived(config ? getBackupRootDir(config, 'remote') : '');
+  let latestDirLocal = $derived(config ? getLatestDir(config, 'local') : '');
+  let latestDirRemote = $derived(config ? getLatestDir(config, 'remote') : '');
+  let archivesDirLocal = $derived(config ? getArchivesDir(config, 'local') : '');
+  let archivesDirRemote = $derived(config ? getArchivesDir(config, 'remote') : '');
   let dbDirLocal = $derived(config ? getDbBackupDir(config, 'local') : '');
   let dbDirRemote = $derived(config ? getDbBackupDir(config, 'remote') : '');
 
@@ -91,7 +99,8 @@
     actionMessage = null;
 
     try {
-      config = await loadSiteConfig(effectiveSite);
+      const rawConfig = await loadSiteConfig(effectiveSite);
+      config = normalizeBackupConfig(rawConfig);
       items = await listAllBackups(config);
     } catch (e) {
       loadError = String(e);
@@ -202,9 +211,18 @@
     browseLoading = false;
   }
 
+  async function handleRevealInFinder(item: BackupItem) {
+    try {
+      await revealItemInDir(item.path);
+    } catch (e) {
+      console.error('Failed to reveal in Finder:', e);
+      actionMessage = { type: 'error', text: `Could not show in Finder: ${e}` };
+    }
+  }
+
   async function handleRestoreFiles(item: BackupItem) {
     if (!config) return;
-    if (item.category !== 'trash-archive' && item.category !== 'trash-current') return;
+    if (item.category !== 'backup-archive' && item.category !== 'backup-latest') return;
 
     const dest = item.location === 'remote' ? config.paths.live : config.paths.local;
     const side = item.location === 'remote' ? 'remote server' : 'local machine';
@@ -287,7 +305,8 @@
     actionMessage = null;
     terminalOpen.set(true);
 
-    const backupDir = config.backup?.database?.directory || 'db-backups';
+    const location = direction === 'push' ? 'remote' as const : 'local' as const;
+    const backupDir = resolveDbBackupDir(config, location);
     const filenameFormat = config.backup?.database?.filename_format || 'manual-backup-%Y%m%d-%H%M%S.sql';
 
     const opts: BackupOptions = {
@@ -491,17 +510,17 @@
 
   function categoryLabel(cat: BackupItem['category']): string {
     switch (cat) {
-      case 'trash-archive': return 'Trash Archive';
-      case 'trash-current': return 'Current Trash';
+      case 'backup-archive': return 'Backup Archive';
+      case 'backup-latest': return 'Latest Backup';
       case 'db-backup': return 'DB Backup';
     }
   }
 
   function categoryIcon(cat: BackupItem['category']): string {
     switch (cat) {
-      case 'trash-archive': return '\uD83D\uDDC4'; // file cabinet
-      case 'trash-current': return '\uD83D\uDDD1'; // wastebasket
-      case 'db-backup': return '\uD83D\uDDC3';     // card file box
+      case 'backup-archive': return '\uD83D\uDDC4'; // file cabinet
+      case 'backup-latest': return '\uD83D\uDDCE';  // package
+      case 'db-backup': return '\uD83D\uDDC3';      // card file box
     }
   }
 
@@ -523,7 +542,7 @@
     </div>
     <p class="subtitle">
       {#if effectiveSite}
-        Manage backups and trash for <strong>{effectiveSite}</strong>
+        Manage backups for <strong>{effectiveSite}</strong>
       {:else}
         No site selected
       {/if}
@@ -555,7 +574,7 @@
         <span class="summary-label">Total Size</span>
       </div>
       <div class="summary-card">
-        <span class="summary-value">{trashSummary.itemCount}</span>
+        <span class="summary-value">{backupFileSummary.itemCount}</span>
         <span class="summary-label">File Backups</span>
       </div>
       <div class="summary-card">
@@ -568,13 +587,22 @@
     <details class="paths-info">
       <summary>Backup Directories</summary>
       <div class="paths-grid">
-        <span class="path-label">Local Trash:</span>
-        <code class="path-value">{trashDirLocal}</code>
-        <span class="path-label">Remote Trash:</span>
-        <code class="path-value">{trashDirRemote}</code>
-        <span class="path-label">Local DB Backups:</span>
+        <span class="path-label">Local Backup Root:</span>
+        <code class="path-value">{backupRootLocal}</code>
+        <span class="path-label">&nbsp;&nbsp;Latest:</span>
+        <code class="path-value">{latestDirLocal}</code>
+        <span class="path-label">&nbsp;&nbsp;Archives:</span>
+        <code class="path-value">{archivesDirLocal}</code>
+        <span class="path-label">&nbsp;&nbsp;DB Backups:</span>
         <code class="path-value">{dbDirLocal}</code>
-        <span class="path-label">Remote DB Backups:</span>
+
+        <span class="path-label">Remote Backup Root:</span>
+        <code class="path-value">{backupRootRemote}</code>
+        <span class="path-label">&nbsp;&nbsp;Latest:</span>
+        <code class="path-value">{latestDirRemote}</code>
+        <span class="path-label">&nbsp;&nbsp;Archives:</span>
+        <code class="path-value">{archivesDirRemote}</code>
+        <span class="path-label">&nbsp;&nbsp;DB Backups:</span>
         <code class="path-value">{dbDirRemote}</code>
       </div>
     </details>
@@ -584,7 +612,7 @@
       <div class="filter-group">
         <select class="filter-select" bind:value={filterCategory}>
           <option value="all">All Types</option>
-          <option value="trash-archive">Trash Archives</option>
+          <option value="backup-archive">Backup Archives</option>
           <option value="db-backup">DB Backups</option>
         </select>
         <select class="filter-select" bind:value={filterLocation}>
@@ -782,7 +810,7 @@
                     </svg>
                   </button>
                 {/if}
-                {#if (item.category === 'trash-archive' || item.category === 'trash-current') && item.type === 'directory'}
+                {#if (item.category === 'backup-archive' || item.category === 'backup-latest') && item.type === 'directory'}
                   <button
                     class="btn-icon btn-restore-icon"
                     onclick={() => handleRestoreFiles(item)}
@@ -820,6 +848,17 @@
                     {/if}
                   </button>
                 {/if}
+                {#if item.location === 'local'}
+                  <button
+                    class="btn-icon"
+                    onclick={() => handleRevealInFinder(item)}
+                    title="Show in Finder"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M2 4h12M2 4v8a2 2 0 002 2h8a2 2 0 002-2V4M2 4l1.5-2h9L14 4" />
+                    </svg>
+                  </button>
+                {/if}
                 {#if item.location === 'remote'}
                   <button
                     class="btn-icon"
@@ -837,7 +876,7 @@
                   </button>
                 {/if}
                 <button
-                  class="btn-icon {item.location === 'remote' ? 'btn-danger-icon' : 'btn-trash-icon'}"
+                  class="btn-icon {item.location === 'remote' ? 'btn-danger-icon' : 'btn-delete-icon'}"
                   onclick={() => handleDelete(item)}
                   disabled={actionInProgress === item.path}
                   title={item.location === 'local' ? 'Move to Trash' : 'Delete permanently'}
@@ -1393,7 +1432,7 @@
     color: var(--error);
   }
 
-  .btn-trash-icon:hover:not(:disabled) {
+  .btn-delete-icon:hover:not(:disabled) {
     background: var(--bg-hover);
     color: var(--text-secondary);
   }

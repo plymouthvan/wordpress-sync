@@ -27,7 +27,16 @@ class DatabaseManager:
         self.config = config
         self.local_path = config["paths"]["local"]
         self.live_path = config["paths"]["live"]
-        self.db_temp = config["paths"]["db_temp"]
+        # db_temp can be a string (old format) or dict with local/remote (new format)
+        raw_db_temp = config["paths"]["db_temp"]
+        if isinstance(raw_db_temp, dict):
+            self.db_temp_local = raw_db_temp.get("local", "/tmp")
+            self.db_temp_remote = raw_db_temp.get("remote", "/tmp")
+        else:
+            self.db_temp_local = raw_db_temp
+            self.db_temp_remote = raw_db_temp
+        # Keep legacy attribute for any code that reads self.db_temp directly
+        self.db_temp = self.db_temp_local
         self.db_filename = config["paths"].get("db_filename", "wordpress-sync-database.sql")
         
         # Get the correct local temp directory path
@@ -206,21 +215,23 @@ class DatabaseManager:
         Returns:
             str: Path to the local temporary database directory.
         """
+        db_temp = self.db_temp_local
+        
         # If db_temp is an absolute path, use it directly
-        if os.path.isabs(self.db_temp):
-            return self.db_temp
+        if os.path.isabs(db_temp):
+            return db_temp
             
         # For relative paths that start with ../
-        if self.db_temp.startswith('../'):
+        if db_temp.startswith('../'):
             # Get the parent directory of the WordPress directory
             parent_dir = os.path.dirname(self.local_path.rstrip('/'))
             # Remove the ../ prefix from db_temp
-            relative_path = self.db_temp[3:]
+            relative_path = db_temp[3:]
             # Join the parent directory with the remaining path
             return os.path.join(parent_dir, relative_path)
         
         # For other relative paths, join with local_path
-        return os.path.join(self.local_path, self.db_temp)
+        return os.path.join(self.local_path, db_temp)
             
     def _get_remote_db_temp_path(self):
         """
@@ -229,25 +240,30 @@ class DatabaseManager:
         Returns:
             str: Path to the remote temporary database directory.
         """
+        db_temp = self.db_temp_remote
+        
         # If db_temp is an absolute path, use it directly
-        if os.path.isabs(self.db_temp):
-            return self.db_temp
+        if os.path.isabs(db_temp):
+            return db_temp
             
         # For relative paths that start with ../
-        if self.db_temp.startswith('../'):
+        if db_temp.startswith('../'):
             # Get the parent directory of the WordPress directory
             parent_dir = os.path.dirname(self.live_path.rstrip('/'))
             # Remove the ../ prefix from db_temp
-            relative_path = self.db_temp[3:]
+            relative_path = db_temp[3:]
             # Join the parent directory with the remaining path
             return os.path.join(parent_dir, relative_path)
         
         # For other relative paths, join with live_path
-        return os.path.join(self.live_path, self.db_temp)
+        return os.path.join(self.live_path, db_temp)
         
     def _get_db_backup_path(self, is_remote=False):
         """
         Get the path for database backups.
+        
+        Supports both new format (unified backup.directory dict → <root>/db/)
+        and old format (separate backup.database.directory string).
         
         Args:
             is_remote (bool): Whether the path is for the remote server.
@@ -255,15 +271,10 @@ class DatabaseManager:
         Returns:
             tuple: (backup_dir, backup_filename) - Paths for the backup directory and filename.
         """
-        # Check if database backup settings exist in config
-        if "backup" not in self.config or "database" not in self.config["backup"]:
-            # Use default values if not configured
-            backup_dir = "../wordpress-sync-db-backups"
-            filename_format = "db-backup_%Y-%m-%d_%H%M%S.sql"
-        else:
-            # Get settings from config
-            backup_dir = self.config["backup"]["database"].get("directory", "../wordpress-sync-db-backups")
-            filename_format = self.config["backup"]["database"].get("filename_format", "db-backup_%Y-%m-%d_%H%M%S.sql")
+        # Get filename format (same in both old and new formats)
+        filename_format = "db-backup_%Y-%m-%d_%H%M%S.sql"
+        if "backup" in self.config and "database" in self.config["backup"]:
+            filename_format = self.config["backup"]["database"].get("filename_format", filename_format)
         
         # Generate timestamp for unique backup filename
         timestamp = time.strftime(filename_format.replace(".sql", ""))
@@ -272,19 +283,37 @@ class DatabaseManager:
         # Determine base path based on whether it's remote or local
         base_path = self.live_path if is_remote else self.local_path
         
-        # Resolve the full backup directory path
-        if os.path.isabs(backup_dir):
-            full_backup_dir = backup_dir
-        elif backup_dir.startswith('../'):
-            # Get the parent directory of the WordPress directory
-            parent_dir = os.path.dirname(base_path.rstrip('/'))
-            # Remove the ../ prefix from backup_dir
-            relative_path = backup_dir[3:]
-            # Join the parent directory with the remaining path
-            full_backup_dir = os.path.join(parent_dir, relative_path)
+        # Check if using new unified backup directory format
+        raw_dir = self.config.get("backup", {}).get("directory")
+        if isinstance(raw_dir, dict):
+            # New format: DB backups go in <backup_root>/db/
+            dir_key = "remote" if is_remote else "local"
+            root_dir = raw_dir.get(dir_key, "../wordpress-sync-backups")
+            
+            # Resolve relative path
+            if os.path.isabs(root_dir):
+                full_backup_dir = os.path.join(root_dir, "db")
+            elif root_dir.startswith('../'):
+                parent_dir = os.path.dirname(base_path.rstrip('/'))
+                full_backup_dir = os.path.join(parent_dir, root_dir[3:], "db")
+            else:
+                full_backup_dir = os.path.join(base_path.rstrip('/'), root_dir, "db")
         else:
-            # For other relative paths, join with base_path
-            full_backup_dir = os.path.join(base_path, backup_dir)
+            # Old format: use separate backup.database.directory
+            if "backup" not in self.config or "database" not in self.config["backup"]:
+                backup_dir = "../wordpress-sync-db-backups"
+            else:
+                backup_dir = self.config["backup"]["database"].get("directory", "../wordpress-sync-db-backups")
+            
+            # Resolve the full backup directory path
+            if os.path.isabs(backup_dir):
+                full_backup_dir = backup_dir
+            elif backup_dir.startswith('../'):
+                parent_dir = os.path.dirname(base_path.rstrip('/'))
+                relative_path = backup_dir[3:]
+                full_backup_dir = os.path.join(parent_dir, relative_path)
+            else:
+                full_backup_dir = os.path.join(base_path, backup_dir)
             
         return full_backup_dir, backup_filename
         
