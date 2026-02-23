@@ -130,9 +130,21 @@ All user-facing labels, CLI flags, config keys, and function names that referenc
 - GUI: "Current Trash" -> "Latest Backup", "Trash Archive" -> "Backup Archive", "No Trash" -> "Skip File Backup", "Backup & Trash" -> "Backups"
 - Config: `no_backup` replaces `no_trash` (old key still recognized)
 
-### New CLI Flag: `--skip-final-cleanup`
+### New CLI Flags
 
-Skips step 11 (post-sync backup cleanup) so the GUI can handle it interactively instead of the CLI silently archiving in non-interactive mode.
+- **`--skip-final-cleanup`** -- Skips step 11 (post-sync backup cleanup) so the GUI can handle it interactively instead of the CLI silently archiving in non-interactive mode.
+- **`--sudo-password-stdin`** -- Reads the sudo password from stdin (one line) before processing. This is how the GUI securely pipes the password to the CLI without exposing it on the command line.
+
+### Sudo Password Support (GUI)
+
+Push syncs that require sudo for `chown`/`chmod` now work seamlessly from the GUI:
+
+- **macOS Keychain storage** -- Enter your sudo password once in the SSH config section and it's saved securely in the macOS system Keychain. Never written to YAML files.
+- **Automatic piping** -- On push syncs, the GUI retrieves the password from the Keychain and pipes it to the CLI via `--sudo-password-stdin`.
+- **Non-interactive safety** -- When no password is available, the CLI skips the ownership step with a clear message instead of hanging.
+- **Improved SSH config UX** -- The "Elevated Permissions" section only shows the password field when a sudo user is configured. The sudo SSH key path is hidden by default (inherits the primary key) with an override toggle for advanced setups.
+
+See [Sudo Password Handling](#sudo-password-handling) for full details.
 
 ### GUI Improvements
 
@@ -140,6 +152,7 @@ Skips step 11 (post-sync backup cleanup) so the GUI can handle it interactively 
 - **Resolved path preview** in the Backup config section showing the full `latest/`, `archives/`, `db/` tree
 - **"Show in Finder" button** in Backup Manager for local items
 - **Auto-migration** of old config formats to the new `{ local, remote }` dict format on load
+- **Improved stall detection** -- Tiered, non-repeating notices during sync (5 min info / 15 min warning) instead of spamming "CLI may be stuck" every 60 seconds
 
 ---
 
@@ -316,8 +329,8 @@ ssh:
   port: 22
   key_path: ~/.ssh/id_rsa
   sudo:
-    user: root              # Optional: dedicated sudo user
-    key_path: ~/.ssh/root   # Optional: separate SSH key for sudo
+    user: root              # Optional: SSH user with sudo privileges for chown/chmod
+    key_path: ~/.ssh/root   # Optional: separate SSH key (defaults to ssh.key_path if omitted)
 
 operation:
   direction: "pull"
@@ -443,7 +456,10 @@ wordpress-sync --direction push --config config.yaml --non-interactive --skip-fi
 # Pass extra args to rsync
 wordpress-sync --direction push --config config.yaml --extra-rsync-args "--bwlimit=1000"
 
-# Provide sudo password for remote operations
+# Provide sudo password via stdin (recommended for scripts/GUI)
+echo "password" | wordpress-sync --direction push --config config.yaml --sudo-password-stdin
+
+# Provide sudo password directly (appears in process list)
 wordpress-sync --direction push --config config.yaml --sudo-password "password"
 ```
 
@@ -585,12 +601,34 @@ gui/                          # Tauri desktop application
 
 ## Sudo Password Handling
 
-The CLI supports four methods for sudo operations (used when pushing to set permissions on the remote server):
+When pushing to a remote server, the CLI uses sudo to set file ownership and permissions. The sudo user is configured via `ssh.sudo.user` in the site config. There are several ways to provide credentials:
 
-1. **Dedicated sudo user** (most secure) -- Configure `ssh.sudo.user` and optionally `ssh.sudo.key_path` in the config
-2. **NOPASSWD sudo** -- Configure the server to allow passwordless sudo
-3. **Command-line password** -- Pass `--sudo-password "..."` (appears in process list)
-4. **Interactive prompt** -- The CLI prompts securely via `getpass()` (CLI-only, not available in non-interactive mode)
+### GUI (recommended)
+
+The GUI stores the sudo password in the **macOS Keychain** -- it's never written to config files or passed on the command line.
+
+1. Go to your site's config, **SSH Connection** section
+2. Under **Elevated Permissions**, enter the **Sudo User** (the SSH user with sudo privileges on the server)
+3. Enter the **Sudo Password** and click **Save** -- this stores it securely in the macOS system Keychain
+4. When you run a push sync, the GUI automatically retrieves the password from the Keychain and pipes it to the CLI via `--sudo-password-stdin`
+
+The password field only appears when a sudo user is configured. You can remove the stored password at any time with the **Remove** button.
+
+> **Note:** If the sudo user authenticates with a different SSH key than the primary user, click "Use a different SSH key for this user" to override. By default, the sudo user inherits the primary SSH key.
+
+### CLI
+
+The CLI supports these methods for sudo operations:
+
+1. **NOPASSWD sudo** (most convenient) -- Configure the server to allow passwordless sudo for the user. No password handling needed.
+2. **`--sudo-password-stdin`** -- Reads one line from stdin before processing. Useful for piping from a password manager or script:
+   ```bash
+   echo "password" | wordpress-sync --direction push --config config.yaml --sudo-password-stdin
+   ```
+3. **`--sudo-password "..."`** -- Pass the password directly (appears in process list -- use with caution)
+4. **Interactive prompt** -- When running interactively (no `--non-interactive` flag), the CLI prompts securely via `getpass()`. Not available in non-interactive/GUI mode.
+
+> **Non-interactive mode:** When `--non-interactive` is active without `--sudo-password-stdin` or `--sudo-password`, the ownership step is skipped with a clear log message instead of hanging.
 
 ---
 

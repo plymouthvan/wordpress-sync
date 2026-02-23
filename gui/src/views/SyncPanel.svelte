@@ -17,6 +17,7 @@
   import { parseRsyncProgress, parseStepMarker, isInteractivePrompt, stripAnsi } from '$lib/utils/outputParser';
   import { termCommand, termStdout, termStderr, termError, termInfo, termSuccess, terminalOpen } from '$lib/stores/terminal';
   import { checkLatestHasContents, deleteLatestContents, archiveLatestContents, resolveDbBackupDir } from '$lib/services/backup';
+  import { getSudoPassword } from '$lib/services/keychain';
   import DiffViewer from '$lib//../components/sync/DiffViewer.svelte';
   import StepTracker from '$lib//../components/sync/StepTracker.svelte';
   import LogOutput from '$lib//../components/sync/LogOutput.svelte';
@@ -166,9 +167,33 @@
   // Interactive prompt
   let pendingPrompt: { question: string; type: 'yesno' } | null = $state(null);
 
-  // Stall detection timers
+  /**
+   * If the site is a push with a sudo user, fetch the stored password from Keychain.
+   * Returns null if not applicable or no password stored.
+   */
+  async function fetchSudoPasswordIfNeeded(): Promise<string | null> {
+    if (direction !== 'push') return null;
+    const sudoUser = siteConfig?.ssh?.sudo?.user;
+    if (!sudoUser) return null;
+    try {
+      const password = await getSudoPassword($selectedSite ?? '');
+      if (password) {
+        termInfo(`Sudo password found in Keychain for "${$selectedSite}" (user: ${sudoUser})`);
+      } else {
+        termInfo(`No sudo password in Keychain for "${$selectedSite}". Ownership step may be skipped.`);
+      }
+      return password;
+    } catch (e) {
+      console.error('Failed to fetch sudo password from Keychain:', e);
+      return null;
+    }
+  }
+
+  // Stall detection timers (tiered: info first, then error, no repeats)
   let dryRunStallTimer: ReturnType<typeof setInterval> | null = null;
+  let dryRunStallTier = 0; // 0=none, 1=info (2min), 2=error (5min)
   let syncStallTimer: ReturnType<typeof setInterval> | null = null;
+  let syncStallTier = 0; // 0=none, 1=info (5min), 2=error (15min)
 
   // Computed
   let durationStr = $derived.by(() => {
@@ -216,13 +241,14 @@
     }
   }
 
-  function buildSyncOpts(): SyncOptions {
+  function buildSyncOpts(sudoPasswordStdin = false): SyncOptions {
     return {
       direction,
       syncType,
       skipValidation,
       skipWpCheck,
       noBackup,
+      sudoPasswordStdin,
     };
   }
 
@@ -233,11 +259,15 @@
       return;
     }
 
+    // Fetch sudo password before spawning (for push syncs with sudo user)
+    const sudoPassword = await fetchSudoPasswordIfNeeded();
+    const useSudoStdin = sudoPassword !== null;
+
     try {
       const configPath = await getSiteConfigPath($selectedSite);
       dryRunOutput = ['Starting dry run...'];
 
-      const cmd = createDryRunCommand(cliPath, configPath, buildSyncOpts());
+      const cmd = createDryRunCommand(cliPath, configPath, buildSyncOpts(useSudoStdin));
       let stdoutBuf = '';
       let stderrBuf = '';
       let lastOutputTime = Date.now();
@@ -271,6 +301,7 @@
         pendingLines.push(line);
         scheduleFlush();
         lastOutputTime = Date.now();
+        dryRunStallTier = 0;
 
         // Safety net: if the CLI somehow still prompts despite --non-interactive,
         // detect and auto-respond "no" to prevent hanging.
@@ -291,6 +322,7 @@
         pendingLines.push(`[stderr] ${line}`);
         scheduleFlush();
         lastOutputTime = Date.now();
+        dryRunStallTier = 0;
       });
 
       // Handle process exit - fire-and-forget, no await blocking
@@ -325,15 +357,37 @@
       const child = await cmd.spawn();
       activeChild = child;
 
-      // Stall detection: if no output for 30 seconds, the CLI is likely
-      // blocked waiting for input it will never receive (no TTY).
-      dryRunStallTimer = setInterval(() => {
-        if (activeChild && Date.now() - lastOutputTime > 30_000) {
-          pendingLines.push('', '[stalled] No output for 30 seconds. The CLI may be waiting for input.');
-          flushPendingLines();
-          termError('Process appears stalled (no output for 30s). It may be waiting for interactive input.');
+      // If we have a sudo password, pipe it to stdin immediately after spawn.
+      // The CLI reads one line from stdin (--sudo-password-stdin) before processing.
+      if (useSudoStdin && sudoPassword) {
+        try {
+          await child.write(sudoPassword + '\n');
+        } catch (e) {
+          console.error('Failed to write sudo password to stdin:', e);
+          termError('Failed to send sudo password to CLI process.');
         }
-      }, 10_000);
+      }
+
+      // Stall detection: tiered notices for long-running operations.
+      // Tier 1 (2 min): informational — remote may be slow.
+      // Tier 2 (5 min): warning — connection may have dropped.
+      dryRunStallTier = 0;
+      dryRunStallTimer = setInterval(() => {
+        if (!activeChild) return;
+        const elapsed = Date.now() - lastOutputTime;
+        const elapsedMin = Math.floor(elapsed / 60_000);
+        if (dryRunStallTier < 2 && elapsed > 300_000) {
+          dryRunStallTier = 2;
+          pendingLines.push('', `[warning] No output for ${elapsedMin} minutes. The process may be waiting for input or the connection may have dropped.`);
+          flushPendingLines();
+          termError(`No output for ${elapsedMin} minutes — the process may need input or the SSH connection may have dropped.`);
+        } else if (dryRunStallTier < 1 && elapsed > 120_000) {
+          dryRunStallTier = 1;
+          pendingLines.push('', `[waiting] No output for ${elapsedMin} minutes — the remote server may be slow to respond.`);
+          flushPendingLines();
+          termInfo(`No output for ${elapsedMin} minutes — the remote server may be slow to respond.`);
+        }
+      }, 30_000);
 
     } catch (e) {
       dryRunError = String(e);
@@ -354,6 +408,10 @@
   async function executeFullSync() {
     const cliPath = appSettings.cli_path;
     if (!cliPath || !$selectedSite) return;
+
+    // Fetch sudo password before spawning (for push syncs with sudo user)
+    const sudoPassword = await fetchSudoPasswordIfNeeded();
+    const useSudoStdin = sudoPassword !== null;
 
     syncStartTime = Date.now();
     // These match the CLI's 12-step sequence exactly.
@@ -378,7 +436,7 @@
 
     try {
       const configPath = await getSiteConfigPath($selectedSite);
-      const cmd = createSyncCommand(cliPath, configPath, buildSyncOpts());
+      const cmd = createSyncCommand(cliPath, configPath, buildSyncOpts(useSudoStdin));
 
       terminalOpen.set(true);
       termCommand(`wordpress-sync --config "${configPath}" --no-dry-run --non-interactive`);
@@ -434,8 +492,10 @@
           rsyncProgress = progress;
         }
 
-        // Track output time for stall detection
+        // Track output time for stall detection; reset tier so the next
+        // quiet period gets its own fresh set of tiered notices.
         lastSyncOutputTime = Date.now();
+        syncStallTier = 0;
 
         // Check for interactive prompts — show dialog for user to decide
         // unless the prompt is unexpected (safety net: auto-respond)
@@ -459,6 +519,8 @@
         pendingSyncLines.push(`[stderr] ${line}`);
         scheduleSyncFlush();
         appendLogLine(line);
+        lastSyncOutputTime = Date.now();
+        syncStallTier = 0;
       });
 
       cmd.on('close', (payload: { code: number | null; signal: number | null }) => {
@@ -575,15 +637,39 @@
       const child = await cmd.spawn();
       activeChild = child;
 
-      // Stall detection: warn if no output for 60 seconds during sync
-      // (sync steps like DB import can be slow, so use a longer threshold than dry run)
-      syncStallTimer = setInterval(() => {
-        if (activeChild && Date.now() - lastSyncOutputTime > 60_000) {
-          pendingSyncLines.push('', '[stalled] No output for 60 seconds. The CLI may be stuck.');
-          flushSyncLines();
-          termError('Sync process appears stalled (no output for 60s). It may be waiting for interactive input or a hung SSH connection.');
+      // If we have a sudo password, pipe it to stdin immediately after spawn.
+      // The CLI reads one line from stdin (--sudo-password-stdin) before processing.
+      if (useSudoStdin && sudoPassword) {
+        try {
+          await child.write(sudoPassword + '\n');
+        } catch (e) {
+          console.error('Failed to write sudo password to stdin:', e);
+          termError('Failed to send sudo password to CLI process.');
         }
-      }, 15_000);
+      }
+
+      // Stall detection: tiered notices for long-running operations.
+      // Many sync steps (chmod on thousands of files, SCP of large DBs, DB import)
+      // produce no output for several minutes — that's normal.
+      // Tier 1 (5 min): informational — normal for large sites.
+      // Tier 2 (15 min): warning — something may actually be wrong.
+      syncStallTier = 0;
+      syncStallTimer = setInterval(() => {
+        if (!activeChild) return;
+        const elapsed = Date.now() - lastSyncOutputTime;
+        const elapsedMin = Math.floor(elapsed / 60_000);
+        if (syncStallTier < 2 && elapsed > 900_000) {
+          syncStallTier = 2;
+          pendingSyncLines.push('', `[warning] No output for ${elapsedMin} minutes. The SSH connection may have dropped, or the process may need input.`);
+          flushSyncLines();
+          termError(`No output for ${elapsedMin} minutes — the SSH connection may have dropped or the process may need input.`);
+        } else if (syncStallTier < 1 && elapsed > 300_000) {
+          syncStallTier = 1;
+          pendingSyncLines.push('', `[waiting] No output for ${elapsedMin} minutes — this is normal for large file permission changes or database operations.`);
+          flushSyncLines();
+          termInfo(`No output for ${elapsedMin} minutes — this is normal for large sites. Still working...`);
+        }
+      }, 60_000);
     } catch (e) {
       syncEndTime = Date.now();
       syncResult = 'failed';
@@ -662,10 +748,12 @@
       clearInterval(dryRunStallTimer);
       dryRunStallTimer = null;
     }
+    dryRunStallTier = 0;
     if (syncStallTimer) {
       clearInterval(syncStallTimer);
       syncStallTimer = null;
     }
+    syncStallTier = 0;
     phase = 'options';
     resetSyncState();
     logLines = [];

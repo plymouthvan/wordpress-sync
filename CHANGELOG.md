@@ -20,6 +20,28 @@ All notable changes to this project will be documented in this file.
 **New CLI flags:**
 - `--no-backup` -- Disable file backup during sync (replaces `--no-trash`, which is kept as a backward-compatible alias)
 - `--skip-final-cleanup` -- Skip the post-sync backup cleanup step (step 11), allowing the GUI to own that dialog instead of the CLI silently archiving in non-interactive mode
+- `--sudo-password-stdin` -- Read the sudo password from stdin (one line) before processing, enabling the GUI to pipe credentials securely without requiring an interactive TTY
+
+**Sudo password support for GUI push syncs:**
+- CLI: `getpass()` calls in `ssh_manager.py` are now guarded by `self.non_interactive` -- in non-interactive mode the ownership step is skipped with a clear message instead of hanging on a missing TTY
+- CLI: New `--sudo-password-stdin` flag reads the password from stdin before redirecting stdin to `/dev/null`, so the password is consumed first and child processes never see an open stdin
+- GUI (Rust): macOS Keychain integration via the `security-framework` crate -- three Tauri commands (`store_credential`, `get_credential`, `delete_credential`) for CRUD operations on the system credential store
+- GUI (TypeScript): `keychain.ts` service wrapping the Tauri commands with site-scoped helpers (`storeSudoPassword`, `getSudoPassword`, `deleteSudoPassword`, `hasSudoPassword`)
+- GUI (SectionSSH): Sudo password field in the SSH config section -- save to / remove from Keychain, show/hide toggle, appears only when a sudo user is configured
+- GUI (SyncPanel): On push syncs with a sudo user, the panel automatically fetches the password from Keychain, passes `--sudo-password-stdin` to the CLI, and writes the password to the child process stdin immediately after spawn
+
+**Improved SSH config section UX:**
+- "Sudo (Optional)" section renamed to "Elevated Permissions (Optional)" with clearer descriptions
+- Sudo User field is now full-width with a hint explaining its purpose
+- Sudo Key Path is hidden by default -- a "Use a different SSH key for this user" link reveals it only when needed. If a custom key is already configured, it auto-expands. A Reset button clears it back to inheriting the primary SSH key.
+
+**Improved stall detection during sync:**
+- Stall warnings are now tiered and non-repeating instead of spamming the log every 15 seconds
+- Full sync: informational notice at 5 minutes, error-level warning at 15 minutes (was: error every 60 seconds)
+- Dry run: informational notice at 2 minutes, error-level warning at 5 minutes (was: error every 30 seconds)
+- Tier resets when output resumes, so each quiet period gets its own fresh set of notices
+- Messaging changed from alarmist ("CLI may be stuck") to descriptive ("this is normal for large file permission changes or database operations")
+- Log prefix changed from `[stalled]` to `[waiting]` / `[warning]`
 
 **GUI enhancements:**
 - Config auto-normalization: old-format configs are automatically migrated to the new `{ local, remote }` dict format on load (`normalizeBackupConfig`, `normalizeDbTempConfig`)

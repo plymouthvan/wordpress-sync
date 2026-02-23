@@ -346,6 +346,10 @@ class SSHManager:
                     
                     if check_result.returncode == 0 and "NOPASSWD" in check_result.stdout:
                         print(f"NOPASSWD sudo is available for user {self.sudo_user}.")
+                    elif self.non_interactive:
+                        print(f"Sudo password required for user {self.sudo_user} but running in non-interactive mode.")
+                        print("Pass --sudo-password-stdin or configure NOPASSWD sudo for this user.")
+                        return False, "No password provided (non-interactive)"
                     else:
                         print(f"Sudo password required for user {self.sudo_user}. Please enter it below.")
                         sudo_password = self.password_manager.get_sudo_password()
@@ -679,6 +683,10 @@ class SSHManager:
                     
                     if success and "NOPASSWD" in check_output:
                         print("NOPASSWD sudo is available, no password needed.")
+                    elif self.non_interactive:
+                        print("Sudo password required but running in non-interactive mode.")
+                        print("Pass --sudo-password-stdin or configure NOPASSWD sudo for this user.")
+                        return False
                     else:
                         print("Sudo password required. Please enter it below.")
                         sudo_password = self.password_manager.get_sudo_password()
@@ -769,6 +777,9 @@ class SSHManager:
                             success, check_output = self.execute_remote_command(check_cmd)
                             
                             if not (success and "NOPASSWD" in check_output):
+                                if self.non_interactive:
+                                    print("Sudo password required for cleanup but running in non-interactive mode. Skipping.")
+                                    continue
                                 # Need password - prompt for it
                                 print("Sudo password required for cleanup. Please enter it below.")
                                 sudo_password = self.password_manager.get_sudo_password()

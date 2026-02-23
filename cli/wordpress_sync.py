@@ -505,6 +505,12 @@ class WordPressSync:
         )
         
         parser.add_argument(
+            "--sudo-password-stdin",
+            action="store_true",
+            help="Read sudo password from stdin (one line). Use with piped input or GUI stdin write."
+        )
+        
+        parser.add_argument(
             "--no-backup",
             "--no-trash",  # backward-compatible alias
             action="store_true",
@@ -1486,6 +1492,16 @@ class WordPressSync:
         try:
             # Parse command line arguments
             self.parse_arguments()
+            
+            # If --sudo-password-stdin is set, read the password from stdin
+            # BEFORE we redirect stdin to /dev/null for non-interactive mode.
+            if self.args.sudo_password_stdin and not self.args.sudo_password:
+                try:
+                    line = sys.stdin.readline().strip()
+                    if line:
+                        self.args.sudo_password = line
+                except (EOFError, OSError):
+                    pass  # No stdin available; sudo_password remains None
             
             # In non-interactive mode, redirect stdin to /dev/null so that
             # all child processes (ssh, scp, rsync, wp-cli, etc.) get EOF

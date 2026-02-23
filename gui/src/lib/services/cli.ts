@@ -217,6 +217,7 @@ function buildCliFlags(opts: {
   noDryRun?: boolean;
   itemizeChanges?: boolean;
   nonInteractive?: boolean;
+  sudoPasswordStdin?: boolean;
 }): string {
   const flags: string[] = [];
   if (opts.direction) flags.push(`--direction ${opts.direction}`);
@@ -229,6 +230,7 @@ function buildCliFlags(opts: {
   if (opts.noDryRun) flags.push('--no-dry-run');
   if (opts.itemizeChanges) flags.push('--itemize-changes');
   if (opts.nonInteractive) flags.push('--non-interactive');
+  if (opts.sudoPasswordStdin) flags.push('--sudo-password-stdin');
   return flags.join(' ');
 }
 
@@ -238,6 +240,8 @@ export interface SyncOptions {
   skipValidation?: boolean;
   skipWpCheck?: boolean;
   noBackup?: boolean;
+  /** When true, the CLI will read the sudo password from stdin before processing. */
+  sudoPasswordStdin?: boolean;
 }
 
 /**
@@ -259,7 +263,13 @@ export function createDryRunCommand(cliPath: string, configPath: string, opts: S
  * stream output.
  */
 export function createSyncCommand(cliPath: string, configPath: string, opts: SyncOptions = {}) {
-  const flags = buildCliFlags({ ...opts, noDryRun: true, nonInteractive: true, skipFinalCleanup: true });
+  const flags = buildCliFlags({
+    ...opts,
+    noDryRun: true,
+    nonInteractive: true,
+    skipFinalCleanup: true,
+    sudoPasswordStdin: opts.sudoPasswordStdin,
+  });
   return Command.create('exec-sh', [
     '-c',
     `${PATH_SETUP}; "${cliPath}" --config "${configPath}" ${flags}`

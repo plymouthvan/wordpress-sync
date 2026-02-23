@@ -300,7 +300,7 @@
         <div class="sections-list">
           <div data-section="ssh">
             <CollapsibleSection title="SSH Connection" bind:open={sshOpen}>
-              <SectionSSH {config} onchange={updateConfig} />
+              <SectionSSH {config} onchange={updateConfig} {siteName} />
             </CollapsibleSection>
           </div>
 
